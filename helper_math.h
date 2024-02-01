@@ -2034,4 +2034,8 @@ inline __host__ __device__ int4 round_intf(float4 a)
     return make_int4(roundf(a.x), roundf(a.y), roundf(a.z), roundf(a.w));
 }
 
+
+
+
+
 #endif

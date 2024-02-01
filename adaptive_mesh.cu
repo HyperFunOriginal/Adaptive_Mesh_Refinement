@@ -21,22 +21,22 @@ struct octree_indexer
 {
 	char data;
 
-	inline char get_pos() const
+	inline __device__ __host__ char get_pos() const
 	{
 		return data & 7;
 	}
-	inline float3 get_pos_3D_float() const {
+	inline __device__ __host__ float3 get_pos_3D_float() const {
 		return make_float3(data & 1, (data >> 1) & 1, (data >> 2) & 1) - 0.5f;
 	}
-	inline int3 get_pos_3D() const
+	inline __device__ __host__ int3 get_pos_3D() const
 	{
 		return make_int3(data & 1, (data >> 1) & 1, (data >> 2) & 1);
 	}
-	inline char get_hidden_data() const
+	inline __device__ __host__ char get_hidden_data() const
 	{
 		return data >> 3;
 	}
-	void set_hidden_data(char dat)
+	__device__ __host__ void set_hidden_data(char dat)
 	{
 		data &= 7;
 		data |= dat << 3;
@@ -52,13 +52,20 @@ struct simulation_domain
 {
 	char depth; octree_indexer offset;
 	int internal_flattened_index;
+	int internal_flattened_index_old;
 	simulation_domain* parent;
 	std::vector<simulation_domain*> subdomains;
 	simulation_domain* operator[] (const octree_indexer s) {
 		return subdomains[s.get_pos()];
 	}
 
-	simulation_domain(const octree_indexer offset, simulation_domain* parent) : parent(parent), offset(offset), internal_flattened_index(-1)
+	bool newly_born() const { return internal_flattened_index_old == -1; }
+	void set_internal_index(int id)
+	{
+		internal_flattened_index_old = internal_flattened_index;
+		internal_flattened_index = id;
+	}
+	simulation_domain(const octree_indexer offset, simulation_domain* parent) : parent(parent), offset(offset), internal_flattened_index(-1), internal_flattened_index_old(-1)
 	{
 		depth = parent == nullptr ? 0 : (parent -> depth) + 1;
 		subdomains.resize(8);
@@ -163,15 +170,17 @@ struct parent_domain
 	const uint3 domain_resolution;
 	simulation_domain* root;
 	size_t size_required;
+	int new_child_index_start;
 
 	std::vector<simulation_domain*> domains;
 	std::vector<domain_boundary> boundaries;
 
 private:
+	bool dirty;
 	void recursive_add(simulation_domain* root)
 	{
 		domains.reserve(1024);
-		root->internal_flattened_index = domains.size();
+		root->set_internal_index(domains.size());
 		domains.push_back(root);
 		for (int i = 0; i < 8; i++)
 			if (root->subdomains[i] != nullptr)
@@ -184,26 +193,46 @@ private:
 
 		for (int i = 0; i < nodes; i++)
 			for (int j = 0; j < 6; j++)
-				boundaries[(size_t)i * 6 + j] = domain_boundary(domains[i], directions[j], root);
+				if (domains[i] != nullptr)
+					boundaries[(size_t)i * 6 + j] = domain_boundary(domains[i], directions[j], root);
 	}
 
 public:
-	parent_domain(simulation_domain* root, uint3 domain_resolution) : root(root), domain_resolution(domain_resolution)
+	parent_domain(simulation_domain* root, uint3 domain_resolution) : root(root), domain_resolution(domain_resolution), dirty(false)
 	{
 		recursive_add(root);
 		add_all_boundaries(root);
 		size_required = domains.size() * domain_resolution.x * domain_resolution.y * domain_resolution.z;
 	}
-	void regenerate()
+	simulation_domain* add_child(simulation_domain* parent, octree_indexer offset)
 	{
-		domains.clear();
+		simulation_domain* result = parent->addChild(offset);
+		size_t position = domains.size();
+		result->set_internal_index(position);
+		domains.push_back(result);
+		dirty = true;
+
+		if (new_child_index_start == 0) { new_child_index_start  = position; }
+		size_required = position * domain_resolution.x * domain_resolution.y * domain_resolution.z;
+		return result;
+	}
+	void regenerate_boundaries()
+	{
 		boundaries.clear();
 
-		recursive_add(root);
 		add_all_boundaries(root);
+		dirty = false;
+	}
+	void regenerate_domains()
+	{
+		domains.clear();
+		new_child_index_start = 0;
+
+		recursive_add(root);
+		regenerate_boundaries();
 		size_required = domains.size() * domain_resolution.x * domain_resolution.y * domain_resolution.z;
 	}
-
+	bool is_dirty() const { return dirty; }
 	void destroy()
 	{
 		delete root;
@@ -212,12 +241,12 @@ public:
 	}
 };
 
-__device__ constexpr int lookup_table_positive_dir[8] = { -1, 2, 1, -1, 0, -1, -1, -1 };
-__device__ constexpr int lookup_table_negative_dir[8] = { -1, 5, 4, -1, 3, -1, -1, -1 };
+__device__ constexpr int _lookup_table_positive_dir[8] = { -1, 2, 1, -1, 0, -1, -1, -1 };
+__device__ constexpr int _lookup_table_negative_dir[8] = { -1, 5, 4, -1, 3, -1, -1, -1 };
 
 // [-1]: no boundary
 // [0-5]: [+x,+y,+z,-x,-y,-z]
-inline __device__ int boundary_index(int3 internal_position, int3 domain_resolution)
+inline __device__ int _boundary_index(int3 internal_position, int3 domain_resolution)
 {
 	internal_position -= clamp(internal_position, make_int3(0), domain_resolution - 1);
 	if (internal_position == make_int3(0))
@@ -227,14 +256,14 @@ inline __device__ int boundary_index(int3 internal_position, int3 domain_resolut
 	int result = ((internal_position.x & 2) << 4) | ((internal_position.y & 2) << 3) | ((internal_position.z & 2) << 2)
 		| ((internal_position.x & 1) << 2) | ((internal_position.y & 1) << 1) | (internal_position.z & 1);
 
-	return ((result & 7) != 0) ? lookup_table_negative_dir[result & 7] : lookup_table_positive_dir[result >> 3];
+	return ((result & 7) != 0) ? _lookup_table_negative_dir[result & 7] : _lookup_table_positive_dir[result >> 3];
 }
 
-inline __device__ float3 to_UVs(int3 internal_position, int3 domain_resolution)
+inline __device__ float3 _to_UVs(int3 internal_position, int3 domain_resolution)
 {
 	return make_float3(internal_position) * 2.f / make_float3(domain_resolution) - 1.f;
 }
-inline __device__ int3 from_UVs(float3 UVs, int3 domain_resolution)
+inline __device__ int3 _from_UVs(float3 UVs, int3 domain_resolution)
 {
 	return round_intf(make_float3(domain_resolution) * (UVs + 1.f) * 0.5f);
 }
@@ -246,13 +275,19 @@ inline __device__ int3 from_UVs(float3 UVs, int3 domain_resolution)
 /// </summary>
 struct simulation_domain_gpu
 {
-	int depth;
-
+	// 48 bytes; 3x load16bytes
+	int depth; 
+	int internal_flattened_index_old;
 	int internal_flattened_index;
 	int parent_index;
 	int child_indices[8];
 
-	simulation_domain_gpu(simulation_domain* a) : internal_flattened_index(a->internal_flattened_index), depth(a->depth)
+	simulation_domain_gpu() : depth(-1), internal_flattened_index(-1), parent_index(-1), internal_flattened_index_old(-1)
+	{
+		child_indices[0] = -1;
+	}
+
+	simulation_domain_gpu(simulation_domain* a) : internal_flattened_index(a->internal_flattened_index), depth(a->depth), internal_flattened_index_old(a->internal_flattened_index_old)
 	{
 		parent_index = a->parent == nullptr ? -1 : a->parent->internal_flattened_index;
 		for (int i = 0; i < 8; i++)
@@ -265,27 +300,32 @@ struct simulation_domain_gpu
 /// </summary>
 struct domain_boundary_gpu
 {
-	int boundary_ptr;
+	int boundary_ptr; // 20 bytes; load16bytes, load4bytes
 	float relative_size;
 	float3 offset;
 
-	domain_boundary_gpu(domain_boundary a) : boundary_ptr(a.boundary->internal_flattened_index), relative_size(a.relative_size), offset(a.offset) {}
+	domain_boundary_gpu() : boundary_ptr(-1), relative_size(1.f), offset(make_float3(0.f)) {}
+
+	domain_boundary_gpu(domain_boundary a) : boundary_ptr(a.boundary == nullptr ? -1 : a.boundary->internal_flattened_index), relative_size(a.relative_size), offset(a.offset) {}
 };
 
+static_assert(sizeof(simulation_domain_gpu) == 48, "Wrong padding!!!");
+static_assert(sizeof(domain_boundary_gpu) == 20, "Wrong padding!!!");
+
 template <class T>
-inline __device__ void set_index_raw(T* buffer, T val, int domain_index, int3 internal_position, int3 domain_resolution)
+inline __device__ void _set_index_raw(T* buffer, T val, int domain_index, int3 internal_position, int3 domain_resolution)
 {
 	buffer[flatten(internal_position, domain_resolution) + domain_index * domain_resolution.x * domain_resolution.y * domain_resolution.z] = val;
 }
 
 template <class T>
-inline __device__ T load_index_raw(T* buffer, int domain_index, int3 internal_position, int3 domain_resolution)
+inline __device__ T _load_index_raw(T* buffer, int domain_index, int3 internal_position, int3 domain_resolution)
 {
 	return buffer[flatten(internal_position, domain_resolution) + domain_index * domain_resolution.x * domain_resolution.y * domain_resolution.z];
 }
 
 template <class T>
-inline __device__ T load_index_raw(T* buffer, int domain_index, int stride, int3 internal_position, int3 domain_resolution)
+inline __device__ T _load_index_raw(T* buffer, int domain_index, int stride, int3 internal_position, int3 domain_resolution)
 {
 	return buffer[flatten(internal_position, domain_resolution) + domain_index * stride];
 }
@@ -301,18 +341,22 @@ inline __device__ T load_index_raw(T* buffer, int domain_index, int stride, int3
 /// <param name="domain_resolution">Global constant; domain resolution</param>
 /// <returns></returns>
 template <class T>
-inline __device__ T load_index(T* buffer, domain_boundary_gpu* boundaries, int domain_index, int3 internal_position, int3 domain_resolution)
+inline __device__ T _load_index(T* buffer, domain_boundary_gpu* boundaries, int domain_index, int3 internal_position, int3 domain_resolution)
 {
-	int bdx = boundary_index(internal_position, domain_resolution);
+	int bdx = _boundary_index(internal_position, domain_resolution);
 	int stride = domain_resolution.x * domain_resolution.y * domain_resolution.z;
 
 	if (bdx == -1)
-		return load_index_raw(buffer, domain_index, stride, internal_position, domain_resolution);
+		return _load_index_raw(buffer, domain_index, stride, internal_position, domain_resolution);
 	
 	domain_boundary_gpu bounds = boundaries[domain_index * 6 + bdx];
-	int3 new_index = from_UVs(to_UVs(internal_position, domain_resolution) / bounds.relative_size + bounds.offset, domain_resolution);
 
-	return load_index_raw(buffer, bounds.boundary_ptr, stride, new_index, domain_resolution);
+	if (bounds.boundary_ptr == -1)
+		return _load_index_raw(buffer, domain_index, stride, internal_position, domain_resolution);
+
+	int3 new_index = _from_UVs(_to_UVs(internal_position, domain_resolution) / bounds.relative_size + bounds.offset, domain_resolution);
+
+	return _load_index_raw(buffer, bounds.boundary_ptr, stride, new_index, domain_resolution);
 }
 
 // AMR-specific implementation
@@ -327,27 +371,27 @@ inline __device__ T load_index(T* buffer, domain_boundary_gpu* boundaries, int d
 /// <param name="bds_buffer">Domain boundary GPU-CPU buffer</param>
 /// <param name="flush">Flush CPU buffers to GPU memory?</param>
 /// <returns>Errors that are encountered.</returns>
-cudaError_t yield_buffers_AMR(const parent_domain& parent, smart_gpu_cpu_buffer<simulation_domain_gpu>& dom_buffer, smart_gpu_cpu_buffer<domain_boundary_gpu>& bds_buffer, bool flush)
+static cudaError_t AMR_yield_buffers(const parent_domain& parent, smart_gpu_cpu_buffer<simulation_domain_gpu>& dom_buffer, smart_gpu_cpu_buffer<domain_boundary_gpu>& bds_buffer, bool flush)
 {
-	if (!dom_buffer.created || !bds_buffer.created)
+	if (!bds_buffer.created || !dom_buffer.created)
 		return cudaErrorInvalidValue;
 
 	const size_t dom_size = parent.domains.size();
 	const size_t bds_size = parent.boundaries.size();
-	if (dom_buffer.dedicated_len < dom_size || bds_buffer.dedicated_len < bds_size)
+	if (bds_buffer.dedicated_len < bds_size || dom_buffer.dedicated_len < dom_size)
 		return cudaErrorMemoryAllocation;
 
+	dom_buffer.temp_data = dom_size;
 	for (int i = 0; i < dom_size; i++)
-		dom_buffer.cpu_buffer_ptr[i] = simulation_domain_gpu(parent.domains[i]);
-	for (int i = 0; i < dom_size; i++)
+		if (parent.domains[i] != nullptr)
+			dom_buffer.cpu_buffer_ptr[i] = simulation_domain_gpu(parent.domains[i]);
+	for (int i = 0; i < bds_size; i++)
 		bds_buffer.cpu_buffer_ptr[i] = domain_boundary_gpu(parent.boundaries[i]);
 
 	if (flush)
 	{
-		cudaError_t err = dom_buffer.copy_to_gpu();
-		if (err != cudaSuccess)
-			return err;
 		return dom_buffer.copy_to_gpu();
+		return bds_buffer.copy_to_gpu();
 	}
 	return cudaSuccess;
 }
@@ -361,9 +405,12 @@ template <class T>
 /// <param name="domain_resolution">Global constant; domain resolution.</param>
 /// <param name="stride">Stride of 1 octree node in buffer.</param>
 /// <returns></returns>
-__global__ void coarsen_domain(T* buffer, simulation_domain_gpu domain, uint3 domain_resolution, int stride)
+__global__ void _coarsen_domain(T* buffer, simulation_domain_gpu domain, uint3 domain_resolution, int stride)
 {
 	const uint3 idx = blockIdx * blockDim + threadIdx;
+	if (idx != min(idx, domain_resolution - make_uint3(1)))
+		return;
+
 	int childIdx = (((idx.x * 2) / domain_resolution.x) & 1) | (((idx.y * 4) / domain_resolution.y) & 2) | (((idx.z * 8) / domain_resolution.z) & 4);
 	if (domain.child_indices[childIdx] == -1)
 		return;
@@ -379,6 +426,135 @@ __global__ void coarsen_domain(T* buffer, simulation_domain_gpu domain, uint3 do
 	buffer[flatten(idx, domain_resolution) + domain.internal_flattened_index * stride] = val / 8.f;
 }
 
+template <class T>
+__device__ T _lerp_buffer(T* buffer, const int domain_index, const uint3 internal_position, const uint3 domain_resolution, const float3 lerp, const int stride)
+{
+	T l000 = buffer[flatten(internal_position + make_uint3(0, 0, 0), domain_resolution) + domain_index * stride] * (1.f - lerp.z) * (1.f - lerp.y) * (1.f - lerp.x);
+	T l100 = buffer[flatten(internal_position + make_uint3(1, 0, 0), domain_resolution) + domain_index * stride] * (1.f - lerp.z) * (1.f - lerp.y) * lerp.x;
+	T l010 = buffer[flatten(internal_position + make_uint3(0, 1, 0), domain_resolution) + domain_index * stride] * (1.f - lerp.z) * lerp.y * (1.f - lerp.x);
+	T l110 = buffer[flatten(internal_position + make_uint3(1, 1, 0), domain_resolution) + domain_index * stride] * (1.f - lerp.z) * lerp.y * lerp.x;
+	T l001 = buffer[flatten(internal_position + make_uint3(0, 0, 1), domain_resolution) + domain_index * stride] * lerp.z * (1.f - lerp.y) * (1.f - lerp.x);
+	T l101 = buffer[flatten(internal_position + make_uint3(1, 0, 1), domain_resolution) + domain_index * stride] * lerp.z * (1.f - lerp.y) * lerp.x;
+	T l011 = buffer[flatten(internal_position + make_uint3(0, 1, 1), domain_resolution) + domain_index * stride] * lerp.z * lerp.y * (1.f - lerp.x);
+	T l111 = buffer[flatten(internal_position + make_uint3(1, 1, 1), domain_resolution) + domain_index * stride] * lerp.z * lerp.y * lerp.x;
+	return l000 + l001 + l010 + l011 + l100 + l101 + l110 + l111;
+}
+
+template <class T>
+__global__ void _refine_domain(T* buffer, simulation_domain_gpu parent, octree_indexer offset, uint3 domain_resolution, uint stride)
+{
+	const uint3 idx = blockIdx * blockDim + threadIdx;
+	if (idx != min(idx, domain_resolution - make_uint3(1)))
+		return;
+
+	const uint3 idx_parent = (idx + make_uint3(offset.get_pos_3D()) * domain_resolution) >> 1;
+	
+	T lerpVal = _lerp_buffer(buffer, parent.internal_flattened_index, idx_parent, domain_resolution, make_float3(idx.x & 1, idx.y & 1, idx.z & 1) * .5f, stride);
+	buffer[flatten(idx, domain_resolution) + parent.child_indices[offset.get_pos()] * stride] = lerpVal;
+}
+
+template <class T>
+static void _coarsen_all_sub(smart_gpu_buffer<T>& t_buffer, const parent_domain& parent, simulation_domain* node, int stride, const dim3& blocks, const dim3& threads)
+{
+	bool children = false;
+	for (int i = 0; i < 8; i++)
+	{
+		if (node->subdomains[i] == nullptr)
+			continue;
+
+		children = true;
+		_coarsen_all_sub(t_buffer, parent, node->subdomains[i], stride, blocks, threads);
+	}
+	if (!children)
+		return;
+	_coarsen_domain<<<blocks, threads>>>(t_buffer.gpu_buffer_ptr, simulation_domain_gpu(node), parent.domain_resolution, stride);
+}
+
+template <class T>
+/// <summary>
+/// Copies all data from the finest domains to coarser domains recursively.
+/// </summary>
+/// <typeparam name="T">Buffer type to copy and coarsen.</typeparam>
+/// <param name="t_buffer">Buffer data to copy and coarsen.</param>
+/// <param name="parent">AMR grid structure object.</param>
+/// <returns>Errors encountered during operation.</returns>
+static cudaError_t AMR_coarsen_all(smart_gpu_buffer<T>& t_buffer, const parent_domain& parent, simulation_domain* start_from)
+{
+	dim3 blocks = dim3(ceil(parent.domain_resolution.x / 16.f), ceil(parent.domain_resolution.y / 8.f), ceil(parent.domain_resolution.z / 8.f));
+	dim3 threads = dim3(min(parent.domain_resolution.x, 16), min(parent.domain_resolution.y, 8), min(parent.domain_resolution.z, 8));
+	_coarsen_all_sub(t_buffer, parent, start_from, parent.domain_resolution.x * parent.domain_resolution.y * parent.domain_resolution.z, blocks, threads);
+	return cudaGetLastError();
+}
+
+template <class T>
+__global__ void _copy_tree_data(const T* old_buffer, T* new_buffer, simulation_domain_gpu* tree_data, uint stride, uint buffer_len)
+{
+	uint id = blockDim.x * blockIdx.x + threadIdx.x;
+
+	if (id >= buffer_len)
+		return;
+
+	simulation_domain_gpu cell_data = tree_data[id / stride];
+
+	if (cell_data.internal_flattened_index_old == -1) // recently born node
+		return;
+
+	new_buffer[id] = old_buffer[(id % stride) + cell_data.internal_flattened_index_old * stride];
+}
+
+template <class T>
+/// <summary>
+/// Updates and copies all data to a new buffer given by the change in tree structure. Required upon regenerating domains.
+/// </summary>
+/// <typeparam name="T">Type of data in buffer</typeparam>
+/// <param name="old_buffer">Old source GPU buffer</param>
+/// <param name="new_buffer">New target GPU buffer</param>
+/// <param name="parent">AMR tree structure</param>
+/// <param name="tree_data">GPU Tree data buffer</param>
+/// <returns>Errors encountered during the operation</returns>
+static cudaError_t AMR_copy_to(const smart_gpu_buffer<T>& old_buffer, smart_gpu_buffer<T>& new_buffer, const parent_domain& parent, smart_gpu_cpu_buffer<simulation_domain_gpu>& tree_data)
+{
+	uint stride = parent.domain_resolution.x * parent.domain_resolution.y * parent.domain_resolution.z;
+	dim3 blocks = dim3(ceil(stride / 1024.f)), threads = dim3(min(stride, 1024));
+	return cuda_invoke_kernel<const T*, T*, simulation_domain_gpu*, uint, uint>(_copy_tree_data, blocks, stride, old_buffer.gpu_buffer_ptr, new_buffer.gpu_buffer_ptr, tree_data.gpu_buffer_ptr, stride, parent.size_required);
+}
+
+template <class T>
+/// <summary>
+/// Copies and refines domain to new child nodes. Required upon adding child nodes. Apply after AMR_copy_to
+/// </summary>
+/// <typeparam name="T">Buffer Type</typeparam>
+/// <param name="tgt_buffer">Buffer to refine within</param>
+/// <param name="parent">AMR tree datastructure</param>
+/// <returns>Errors if any encountered.</returns>
+static cudaError_t AMR_refine_all(smart_gpu_buffer<T>& tgt_buffer, parent_domain& parent)
+{
+	dim3 blocks = dim3(ceil(parent.domain_resolution.x / 16.f), ceil(parent.domain_resolution.y / 8.f), ceil(parent.domain_resolution.z / 8.f));
+	dim3 threads = dim3(min(parent.domain_resolution.x, 16), min(parent.domain_resolution.y, 8), min(parent.domain_resolution.z, 8));
+	uint stride = parent.domain_resolution.x * parent.domain_resolution.y * parent.domain_resolution.z;
+	const size_t nodes = parent.domains.size();
+	for (int i = parent.new_child_index_start; i < nodes; i++)
+	{
+		if (parent.domains[i] == nullptr || !parent.domains[i]->newly_born())
+			continue;
+		_refine_domain<<<blocks, threads>>>(tgt_buffer.gpu_buffer_ptr, simulation_domain_gpu(parent.domains[i]->parent), parent.domains[i]->offset, parent.domain_resolution, stride);
+	}
+	return cudaGetLastError();
+}
+
+
+
+///////////////////////////////////////////////////////
+/// 					To note:					///
+///////////////////////////////////////////////////////
+///		1. Call parent.reg_bds after addChild		///
+///		2. AMR_copy_to after parent.reg_dom			///
+///		3. AMR_refine_all after after addChild		///
+///		4. addChild vs parent.reg_dom commute		///
+///////////////////////////////////////////////////////
+
+
+
 ///////////////////////////////////////////////////////
 /// 				To do:	(Step 2)				///
 ///////////////////////////////////////////////////////
@@ -390,5 +566,7 @@ __global__ void coarsen_domain(T* buffer, simulation_domain_gpu domain, uint3 do
 ///						??? ???						///
 ///				?.		PROFIT!!!					///
 ///////////////////////////////////////////////////////
+
+
 
 #endif

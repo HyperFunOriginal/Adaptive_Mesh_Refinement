@@ -66,17 +66,6 @@ int main()
 //        fprintf(stderr, "cudaDeviceReset failed!");
 //        return 1;
 //    }
-
-    //simulation_domain* root = new simulation_domain(0, nullptr);
-    //simulation_domain* children[8] = {};
-    //for (int i = 0; i < 8; i++)
-    //{
-    //    children[i] = root->addChild(i);
-    //    for (int j = 0; j < 10; j++)
-    //        children[i] = children[i]->addChild(~i);
-    //}
-    //parent_domain parent = parent_domain(root, make_uint3(16, 16, 16));
-
     _sleep(100000);
 
     return 0;

@@ -37,19 +37,57 @@ static cudaError_t cuda_copyfromgpu_buffer(T* cpuB, const T* gpuB, const size_t&
 }
 
 template <class T>
+struct smart_cpu_buffer
+{
+    int temp_data;
+    const int dedicated_len;
+    T* cpu_buffer_ptr;
+    bool created;
+
+    operator T* ()
+    {
+        if (!created)
+            throw std::exception("Buffer already freed.");
+        return cpu_buffer_ptr;
+    }
+    smart_cpu_buffer(int max_size) : dedicated_len(max_size), created(true), temp_data(0)
+    {
+        cpu_buffer_ptr = new T[max_size];
+    }
+
+    void destroy()
+    {
+        delete[] cpu_buffer_ptr;
+        temp_data = 0;
+        created = false;
+    }
+};
+
+template <class T>
 struct smart_gpu_buffer
 {
+    int temp_data;
     const size_t dedicated_len;
     T* gpu_buffer_ptr;
     bool created;
 
-    operator T*()
+    void swap_pointers(smart_gpu_buffer<T>& other)
+    {
+        if (!dedicated_len == other.dedicated_len)
+            throw std::exception("Cannot swap buffers of differing lengths!");
+
+        T* temp = gpu_buffer_ptr;
+        gpu_buffer_ptr = other.gpu_buffer_ptr;
+        other.gpu_buffer_ptr = temp;
+    }
+
+    operator T* ()
     {
         if (!created)
             throw std::exception("Buffer already freed or badly allocated.");
         return gpu_buffer_ptr;
     }
-    smart_gpu_buffer(size_t max_size) : dedicated_len(max_size)
+    smart_gpu_buffer(size_t max_size) : dedicated_len(max_size), temp_data(0)
     {
         gpu_buffer_ptr = 0;
         if (cuda_alloc_buffer(&gpu_buffer_ptr, dedicated_len) != cudaSuccess)
@@ -70,6 +108,24 @@ template <class T>
 struct smart_gpu_cpu_buffer : smart_gpu_buffer<T>
 {
     T* cpu_buffer_ptr;
+
+    smart_gpu_cpu_buffer(smart_cpu_buffer<T>& cpu_buffer, bool destroy_old_success, bool destroy_old_failure) : smart_gpu_buffer<T>(cpu_buffer.dedicated_len)
+    {
+        if (created)
+        {
+            cpu_buffer_ptr = cpu_buffer.cpu_buffer_ptr; 
+
+            if (destroy_old_success)
+            {
+                cpu_buffer.destroy();
+            }
+        }
+        else if (destroy_old_failure)
+        {
+            cpu_buffer.destroy();
+        }
+    }
+
     smart_gpu_cpu_buffer(size_t max_size) : smart_gpu_buffer<T>(max_size)
     {
         if (created)
@@ -99,7 +155,7 @@ struct smart_gpu_cpu_buffer : smart_gpu_buffer<T>
 template<typename... Args>
 static cudaError_t cuda_invoke_kernel(void (*kernel) (Args...), const dim3& blocks, const dim3& threads, Args... args)
 {
-    kernel << <blocks, threads >> > (args...);
+    kernel<<<blocks, threads>>> (args...);
     cudaError_t cudaStatus = cudaGetLastError();
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "Kernel launch failed: %s\n", cudaGetErrorString(cudaStatus));
