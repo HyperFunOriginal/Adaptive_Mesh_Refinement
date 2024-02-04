@@ -1062,6 +1062,33 @@ inline __host__ __device__ float4 operator/(float b, float4 a)
     return make_float4(b / a.x, b / a.y, b / a.z, b / a.w);
 }
 
+
+inline __host__ __device__ uint2 operator/(uint2 a, uint2 b)
+{
+    return make_uint2(a.x / b.x, a.y / b.y);
+}
+inline __host__ __device__ uint3 operator/(uint3 a, uint3 b)
+{
+    return make_uint3(a.x / b.x, a.y / b.y, a.z / b.z);
+}
+inline __host__ __device__ uint4 operator/(uint4 a, uint4 b)
+{
+    return make_uint4(a.x / b.x, a.y / b.y, a.z / b.z, a.w / b.w);
+}
+
+inline __host__ __device__ int2 operator/(int2 a, int2 b)
+{
+    return make_int2(a.x / b.x, a.y / b.y);
+}
+inline __host__ __device__ int3 operator/(int3 a, int3 b)
+{
+    return make_int3(a.x / b.x, a.y / b.y, a.z / b.z);
+}
+inline __host__ __device__ int4 operator/(int4 a, int4 b)
+{
+    return make_int4(a.x / b.x, a.y / b.y, a.z / b.z, a.w / b.w);
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // min
 ////////////////////////////////////////////////////////////////////////////////
@@ -1825,6 +1852,9 @@ inline __device__ __host__ uint4 wxzy(const uint4 a) { return make_uint4(a.w, a.
 
 inline __device__ __host__ int flatten(int3 index, int3 domain_size) { index = clamp(index, make_int3(0), domain_size - make_int3(1)); return index.x + index.y * domain_size.x + index.z * domain_size.y * domain_size.x; }
 inline __device__ __host__ int flatten(uint3 index, uint3 domain_size) { index = min(index, domain_size - make_uint3(1)); return int(index.x + index.y * domain_size.x + index.z * domain_size.y * domain_size.x); }
+inline __device__ __host__ uint3 unflatten(uint flat, uint3 domain_size) {
+    return make_uint3(flat % domain_size.x, (flat / domain_size.x) % domain_size.y, flat / (domain_size.x * domain_size.y));
+}
 
 
 inline __host__ __device__ bool operator==(int2 a, int2 b)

@@ -82,8 +82,10 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="CUDA_memory.h" />
+    <ClInclude Include="custom_data_formats.h" />
     <ClInclude Include="helper_math.h" />
     <ClInclude Include="printstring_helper.h" />
+    <ClInclude Include="spacetime.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

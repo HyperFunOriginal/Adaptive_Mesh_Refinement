@@ -10,7 +10,6 @@
 #include <stdexcept>
 
 
-#define MAX_DEPTH 12
 
 const int3 directions[6] = { make_int3(1, 0, 0), make_int3(0, 1, 0), make_int3(0, 0, 1), make_int3(-1, 0, 0), make_int3(0, -1, 0), make_int3(0, 0, -1) };
 
@@ -81,9 +80,6 @@ struct simulation_domain
 	{
 		if (subdomains[offset.get_pos()] != nullptr)
 			throw std::invalid_argument("Child already exists!");
-
-		if (depth > MAX_DEPTH)
-			return nullptr;
 
 		simulation_domain* child = new simulation_domain(offset, this);
 		subdomains[offset.get_pos()] = child;
@@ -171,6 +167,7 @@ struct parent_domain
 	simulation_domain* root;
 	size_t size_required;
 	int new_child_index_start;
+	const uint stride;
 
 	std::vector<simulation_domain*> domains;
 	std::vector<domain_boundary> boundaries;
@@ -198,12 +195,19 @@ private:
 	}
 
 public:
-	parent_domain(simulation_domain* root, uint3 domain_resolution) : root(root), domain_resolution(domain_resolution), dirty(false)
+	parent_domain(simulation_domain* root, uint3 domain_resolution) : root(root), stride(domain_resolution.x * domain_resolution.y * domain_resolution.z), domain_resolution(domain_resolution), dirty(false), new_child_index_start(0)
 	{
 		recursive_add(root);
 		add_all_boundaries(root);
 		size_required = domains.size() * domain_resolution.x * domain_resolution.y * domain_resolution.z;
 	}
+	parent_domain(uint3 domain_resolution) : root(new simulation_domain(0, nullptr)), stride(domain_resolution.x* domain_resolution.y* domain_resolution.z), domain_resolution(domain_resolution), dirty(false), new_child_index_start(0)
+	{
+		recursive_add(root);
+		add_all_boundaries(root);
+		size_required = (size_t)domain_resolution.x * domain_resolution.y * domain_resolution.z;
+	}
+	
 	simulation_domain* add_child(simulation_domain* parent, octree_indexer offset)
 	{
 		simulation_domain* result = parent->addChild(offset);
@@ -213,9 +217,15 @@ public:
 		dirty = true;
 
 		if (new_child_index_start == 0) { new_child_index_start  = position; }
-		size_required = position * domain_resolution.x * domain_resolution.y * domain_resolution.z;
+		size_required = (position + 1) * domain_resolution.x * domain_resolution.y * domain_resolution.z;
 		return result;
 	}
+	void remove_child(simulation_domain* child)
+	{
+		delete child;
+		dirty = true;
+	}
+	
 	void regenerate_boundaries()
 	{
 		boundaries.clear();
@@ -282,11 +292,11 @@ struct simulation_domain_gpu
 	int parent_index;
 	int child_indices[8];
 
-	simulation_domain_gpu() : depth(-1), internal_flattened_index(-1), parent_index(-1), internal_flattened_index_old(-1)
+	simulation_domain_gpu() : internal_flattened_index(-1), depth(-1), internal_flattened_index_old(-1), parent_index(-1)
 	{
-		child_indices[0] = -1;
+		for (int i = 0; i < 8; i++)
+			child_indices[i] = -1;
 	}
-
 	simulation_domain_gpu(simulation_domain* a) : internal_flattened_index(a->internal_flattened_index), depth(a->depth), internal_flattened_index_old(a->internal_flattened_index_old)
 	{
 		parent_index = a->parent == nullptr ? -1 : a->parent->internal_flattened_index;
@@ -359,6 +369,25 @@ inline __device__ T _load_index(T* buffer, domain_boundary_gpu* boundaries, int 
 	return _load_index_raw(buffer, bounds.boundary_ptr, stride, new_index, domain_resolution);
 }
 
+inline __device__ int _load_index(domain_boundary_gpu* boundaries, int domain_index, int3 internal_position, int3 domain_resolution)
+{
+	int bdx = _boundary_index(internal_position, domain_resolution);
+	int stride = domain_resolution.x * domain_resolution.y * domain_resolution.z;
+
+	if (bdx == -1)
+		return flatten(internal_position, domain_resolution) + domain_index * stride;
+
+	domain_boundary_gpu bounds = boundaries[domain_index * 6 + bdx];
+
+	if (bounds.boundary_ptr == -1)
+		return flatten(internal_position, domain_resolution) + domain_index * stride;
+
+	int3 new_index = _from_UVs(_to_UVs(internal_position, domain_resolution) / bounds.relative_size + bounds.offset, domain_resolution);
+
+	return flatten(new_index, domain_resolution) + bounds.boundary_ptr * stride;
+}
+
+
 // AMR-specific implementation
 
 #include "CUDA_memory.h"
@@ -383,8 +412,7 @@ static cudaError_t AMR_yield_buffers(const parent_domain& parent, smart_gpu_cpu_
 
 	dom_buffer.temp_data = dom_size;
 	for (int i = 0; i < dom_size; i++)
-		if (parent.domains[i] != nullptr)
-			dom_buffer.cpu_buffer_ptr[i] = simulation_domain_gpu(parent.domains[i]);
+		dom_buffer.cpu_buffer_ptr[i] = (parent.domains[i] == nullptr) ? simulation_domain_gpu() : simulation_domain_gpu(parent.domains[i]);
 	for (int i = 0; i < bds_size; i++)
 		bds_buffer.cpu_buffer_ptr[i] = domain_boundary_gpu(parent.boundaries[i]);
 
@@ -418,11 +446,7 @@ __global__ void _coarsen_domain(T* buffer, simulation_domain_gpu domain, uint3 d
 	const uint3 sub_idx = (idx << 1) - make_uint3(childIdx & 1, (childIdx & 2) >> 1, (childIdx & 4) >> 2) * domain_resolution;
 	childIdx = domain.child_indices[childIdx];
 
-	T val = buffer[flatten(sub_idx, domain_resolution) + childIdx * stride] + buffer[flatten(sub_idx + make_uint3(1, 0, 0), domain_resolution) + childIdx * stride];
-	val += buffer[flatten(sub_idx + make_uint3(0, 1, 0), domain_resolution) + childIdx * stride] + buffer[flatten(sub_idx + make_uint3(1, 1, 0), domain_resolution) + childIdx * stride];
-	val += buffer[flatten(sub_idx + make_uint3(0, 0, 1), domain_resolution) + childIdx * stride] + buffer[flatten(sub_idx + make_uint3(1, 0, 1), domain_resolution) + childIdx * stride];
-	val += buffer[flatten(sub_idx + make_uint3(0, 1, 1), domain_resolution) + childIdx * stride] + buffer[flatten(sub_idx + make_uint3(1, 1, 1), domain_resolution) + childIdx * stride];
-
+	T val = buffer[flatten(sub_idx, domain_resolution) + childIdx * stride] + buffer[flatten(sub_idx + make_uint3(1, 0, 0), domain_resolution) + childIdx * stride] + buffer[flatten(sub_idx + make_uint3(0, 1, 0), domain_resolution) + childIdx * stride] + buffer[flatten(sub_idx + make_uint3(1, 1, 0), domain_resolution) + childIdx * stride] + buffer[flatten(sub_idx + make_uint3(0, 0, 1), domain_resolution) + childIdx * stride] + buffer[flatten(sub_idx + make_uint3(1, 0, 1), domain_resolution) + childIdx * stride] + buffer[flatten(sub_idx + make_uint3(0, 1, 1), domain_resolution) + childIdx * stride] + buffer[flatten(sub_idx + make_uint3(1, 1, 1), domain_resolution) + childIdx * stride];
 	buffer[flatten(idx, domain_resolution) + domain.internal_flattened_index * stride] = val / 8.f;
 }
 
@@ -453,6 +477,9 @@ __global__ void _refine_domain(T* buffer, simulation_domain_gpu parent, octree_i
 	buffer[flatten(idx, domain_resolution) + parent.child_indices[offset.get_pos()] * stride] = lerpVal;
 }
 
+
+//////////////////////////////////////////////////////////////////////////////
+
 template <class T>
 static void _coarsen_all_sub(smart_gpu_buffer<T>& t_buffer, const parent_domain& parent, simulation_domain* node, int stride, const dim3& blocks, const dim3& threads)
 {
@@ -482,9 +509,34 @@ static cudaError_t AMR_coarsen_all(smart_gpu_buffer<T>& t_buffer, const parent_d
 {
 	dim3 blocks = dim3(ceil(parent.domain_resolution.x / 16.f), ceil(parent.domain_resolution.y / 8.f), ceil(parent.domain_resolution.z / 8.f));
 	dim3 threads = dim3(min(parent.domain_resolution.x, 16), min(parent.domain_resolution.y, 8), min(parent.domain_resolution.z, 8));
-	_coarsen_all_sub(t_buffer, parent, start_from, parent.domain_resolution.x * parent.domain_resolution.y * parent.domain_resolution.z, blocks, threads);
+	_coarsen_all_sub(t_buffer, parent, start_from, parent.stride, blocks, threads);
 	return cudaGetLastError();
 }
+
+template <class T>
+/// <summary>
+/// Copies and refines domain to new child nodes. Required upon adding child nodes. Apply after AMR_copy_to
+/// </summary>
+/// <typeparam name="T">Buffer Type</typeparam>
+/// <param name="tgt_buffer">Buffer to refine within</param>
+/// <param name="parent">AMR tree datastructure</param>
+/// <returns>Errors if any encountered.</returns>
+static cudaError_t AMR_refine_all(smart_gpu_buffer<T>& tgt_buffer, parent_domain& parent)
+{
+	dim3 blocks = dim3(ceil(parent.domain_resolution.x / 16.f), ceil(parent.domain_resolution.y / 8.f), ceil(parent.domain_resolution.z / 8.f));
+	dim3 threads = dim3(min(parent.domain_resolution.x, 16), min(parent.domain_resolution.y, 8), min(parent.domain_resolution.z, 8));
+	const size_t nodes = parent.domains.size();
+	for (int i = parent.new_child_index_start; i < nodes; i++)
+	{
+		if (parent.domains[i] == nullptr || !parent.domains[i]->newly_born())
+			continue;
+		_refine_domain<<<blocks, threads>>>(tgt_buffer.gpu_buffer_ptr, simulation_domain_gpu(parent.domains[i]->parent), parent.domains[i]->offset, parent.domain_resolution, parent.stride);
+	}
+	parent.new_child_index_start = nodes;
+	return cudaGetLastError();
+}
+
+//////////////////////////////////////////////////////////////////////////////
 
 template <class T>
 __global__ void _copy_tree_data(const T* old_buffer, T* new_buffer, simulation_domain_gpu* tree_data, uint stride, uint buffer_len)
@@ -514,59 +566,106 @@ template <class T>
 /// <returns>Errors encountered during the operation</returns>
 static cudaError_t AMR_copy_to(const smart_gpu_buffer<T>& old_buffer, smart_gpu_buffer<T>& new_buffer, const parent_domain& parent, smart_gpu_cpu_buffer<simulation_domain_gpu>& tree_data)
 {
-	uint stride = parent.domain_resolution.x * parent.domain_resolution.y * parent.domain_resolution.z;
-	dim3 blocks = dim3(ceil(stride / 1024.f)), threads = dim3(min(stride, 1024));
-	return cuda_invoke_kernel<const T*, T*, simulation_domain_gpu*, uint, uint>(_copy_tree_data, blocks, stride, old_buffer.gpu_buffer_ptr, new_buffer.gpu_buffer_ptr, tree_data.gpu_buffer_ptr, stride, parent.size_required);
+	dim3 blocks = dim3(ceil(parent.stride / 1024.f)), threads = dim3(min(parent.stride, 1024));
+	return cuda_invoke_kernel<const T*, T*, simulation_domain_gpu*, uint, uint>(_copy_tree_data, blocks, threads, old_buffer.gpu_buffer_ptr, new_buffer.gpu_buffer_ptr, tree_data.gpu_buffer_ptr, parent.stride, parent.size_required);
+}
+
+// Note: Maximise memory coalescence.
+template <class T>
+__global__ void _helper_integrate_domain(const T* __restrict__ buffer, T* __restrict__ temp_buffer, simulation_domain_gpu* domains, uint stride, uint buffer_len, uint3 domain_size)
+{
+	T temp_reg = T();
+	for (uint i = threadIdx.x; i < buffer_len; i += blockDim.x) // memory coalescence; threads read next to each other.
+	{
+		simulation_domain_gpu data = domains[i / stride]; // warning; heavy object, hope cache takes care of it.
+		uint3 child_index = ((unflatten(i % stride, domain_size) << 1) / domain_size) & make_uint3(1);
+		if (data.child_indices[child_index.x | (child_index.y << 1) | (child_index.z << 2)] != -1) // avoid double-counting
+			continue;
+		temp_reg += exp2f(-data.depth) * buffer[i]; // hope exp2f is optimised
+	}
+	temp_buffer[threadIdx.x] = temp_reg;
 }
 
 template <class T>
 /// <summary>
-/// Copies and refines domain to new child nodes. Required upon adding child nodes. Apply after AMR_copy_to
+/// Integrates over the entire domain a quantity assuming cartesian coordinates.
 /// </summary>
-/// <typeparam name="T">Buffer Type</typeparam>
-/// <param name="tgt_buffer">Buffer to refine within</param>
+/// <typeparam name="T">Numeric type</typeparam>
+/// <param name="buffer">Buffer of numeric type T</param>
+/// <param name="temp_buffer">Temporary integration buffer (must be no larger than 1024! Larger values are more performant.)</param>
 /// <param name="parent">AMR tree datastructure</param>
-/// <returns>Errors if any encountered.</returns>
-static cudaError_t AMR_refine_all(smart_gpu_buffer<T>& tgt_buffer, parent_domain& parent)
+/// <param name="tree_data">Supplemental tree data</param>
+/// <returns></returns>
+static T AMR_integrate(smart_gpu_buffer<T>& buffer, smart_gpu_cpu_buffer<T>& temp_buffer, parent_domain& parent, smart_gpu_cpu_buffer<simulation_domain_gpu>& tree_data)
+{
+	T temp = T();
+	
+	_helper_integrate_domain<<<1, temp_buffer.dedicated_length>>>(buffer, temp_buffer, tree_data, parent.stride, parent.size_required, parent.domain_resolution);
+	cudaError_t err = cudaGetLastError(); if (err != cudaSuccess) { return temp; }
+	err = temp_buffer.copy_to_cpu(); if (err != cudaSuccess) { return temp; }
+	err = cuda_sync(); if (err != cudaSuccess) { return temp; }
+
+	for (int i = 0; i < temp_buffer.dedicated_len; i++)
+		temp += temp_buffer.cpu_buffer_ptr[i];
+
+	return temp;
+}
+
+template <class T>
+static void AMR_coarsen_one(smart_gpu_buffer<T>& t_buffer, const parent_domain& parent, simulation_domain* node)
 {
 	dim3 blocks = dim3(ceil(parent.domain_resolution.x / 16.f), ceil(parent.domain_resolution.y / 8.f), ceil(parent.domain_resolution.z / 8.f));
 	dim3 threads = dim3(min(parent.domain_resolution.x, 16), min(parent.domain_resolution.y, 8), min(parent.domain_resolution.z, 8));
-	uint stride = parent.domain_resolution.x * parent.domain_resolution.y * parent.domain_resolution.z;
-	const size_t nodes = parent.domains.size();
-	for (int i = parent.new_child_index_start; i < nodes; i++)
-	{
-		if (parent.domains[i] == nullptr || !parent.domains[i]->newly_born())
-			continue;
-		_refine_domain<<<blocks, threads>>>(tgt_buffer.gpu_buffer_ptr, simulation_domain_gpu(parent.domains[i]->parent), parent.domains[i]->offset, parent.domain_resolution, stride);
-	}
-	return cudaGetLastError();
+	_coarsen_domain<<<blocks, threads>>>(t_buffer.gpu_buffer_ptr, simulation_domain_gpu(node), parent.domain_resolution, parent.stride);
 }
 
+template <class T>
+static void AMR_refine_one(smart_gpu_buffer<T>& t_buffer, const parent_domain& parent, simulation_domain* new_node)
+{
+	dim3 blocks = dim3(ceil(parent.domain_resolution.x / 16.f), ceil(parent.domain_resolution.y / 8.f), ceil(parent.domain_resolution.z / 8.f));
+	dim3 threads = dim3(min(parent.domain_resolution.x, 16), min(parent.domain_resolution.y, 8), min(parent.domain_resolution.z, 8));
+	_refine_domain<<<blocks, threads>>>(t_buffer.gpu_buffer_ptr, simulation_domain_gpu(new_node->parent), new_node->offset, parent.domain_resolution, parent.stride);
+}
 
+template<typename... Args>
+static void _evaluate_integration_recursive(void(*backwards_euler_step1)(simulation_domain*, float, float, Args...), void(*backwards_euler_step2)(simulation_domain*, float, float, Args...), simulation_domain* domain, float substep, float timestep, Args... args)
+{
+	backwards_euler_step1(domain, substep, timestep, args...);
+	for (int i = 0; i < 8; i++)
+		if (domain->subdomains[i] != nullptr)
+		{
+			_evaluate_integration_recursive(backwards_euler_step1, backwards_euler_step2, domain->subdomains[i], 0.5f, timestep * 0.5f, args...);
+			_evaluate_integration_recursive(backwards_euler_step1, backwards_euler_step2, domain->subdomains[i], 1.f, timestep * 0.5f, args...);
+		}
+	backwards_euler_step2(domain, substep, timestep, args...);
+}
+
+template<typename... Args>
+static cudaError_t AMR_timestep(void(*backwards_euler_step1)(simulation_domain*, float, float, Args...), void(*backwards_euler_step2)(simulation_domain*, float, float, Args...), float timestep, parent_domain& parent, Args... args)
+{
+	_evaluate_integration_recursive(backwards_euler_step1, backwards_euler_step2, parent.root, 1.f, timestep, args...);
+	return cudaGetLastError();
+}
 
 ///////////////////////////////////////////////////////
 /// 					To note:					///
 ///////////////////////////////////////////////////////
 ///		1. Call parent.reg_bds after addChild		///
 ///		2. AMR_copy_to after parent.reg_dom			///
-///		3. AMR_refine_all after after addChild		///
-///		4. addChild vs parent.reg_dom commute		///
+///		3. addChild vs parent.reg_dom commute		///
+///		4. Apply coarsening after evry timestep		///
+///		5. Refine after each substep if needed		///
 ///////////////////////////////////////////////////////
-
-
 
 ///////////////////////////////////////////////////////
 /// 				To do:	(Step 2)				///
 ///////////////////////////////////////////////////////
-///				1. Regridding AMR octree			///
-///				2. Grid refining routine			///
-///				3. Differentiation					///
-///				4. Time Evolution					///
-///				5. Numerical Relativity				///
+///				1. Differentiation					///
+///				2. Time Evolution					///
+///				3. Numerical Relativity				///
 ///						??? ???						///
 ///				?.		PROFIT!!!					///
 ///////////////////////////////////////////////////////
-
 
 
 #endif
