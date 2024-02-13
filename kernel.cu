@@ -30,22 +30,25 @@ int main()
         return 1;
     }
     
-    smart_gpu_buffer<float> float_old = smart_gpu_buffer<float>(gpu_alloc_var);
-    smart_gpu_buffer<float> float_new = smart_gpu_buffer<float>(gpu_alloc_var);
-
-    parent_domain parent = parent_domain(make_uint3(domain_size));
+    parent_node parent = parent_node(make_uint3(domain_size));
     parent.add_child(parent.root, 0);
+    parent.add_child(parent.root, 1);
+    parent.add_child(parent.root, 2);
+    parent.add_child(parent.root, 3);
+    parent.add_child(parent.root, 5);
+    parent.remove_child(parent.add_child(parent.root, 4));
+    parent.add_child(parent.root, 6);
+    parent.add_child(parent.root, 4);
     parent.regenerate_boundaries();
 
-    smart_gpu_cpu_buffer<simulation_domain_gpu> domains = smart_gpu_cpu_buffer<simulation_domain_gpu>(gpu_alloc_dom);
-    smart_gpu_cpu_buffer<domain_boundary_gpu> boundaries = smart_gpu_cpu_buffer<domain_boundary_gpu>(gpu_alloc_bds);
+    BSSN_simulation simulation = BSSN_simulation(gpu_alloc_var, parent.stride);
+
+    smart_gpu_cpu_buffer<octree_node_gpu> domains = smart_gpu_cpu_buffer<octree_node_gpu>(gpu_alloc_dom);
+    smart_gpu_cpu_buffer<octree_boundary_gpu> boundaries = smart_gpu_cpu_buffer<octree_boundary_gpu>(gpu_alloc_bds);
 
     AMR_yield_buffers(parent, domains, boundaries, true);
-
     sleep_forever();
 
-    float_old.destroy();
-    float_new.destroy();
     boundaries.destroy();
     domains.destroy();
     parent.destroy();

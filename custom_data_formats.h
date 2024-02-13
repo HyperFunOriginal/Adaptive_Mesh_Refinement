@@ -13,6 +13,7 @@ __device__ constexpr int nonexponent_offset_shared_f3 = 29 - significand_shared_
 __device__ constexpr int exponent_max_shared_f3 = (1 << nonexponent_offset_shared_f3) - 1;
 __device__ constexpr int significand_max_shared_f3 = (1 << significand_shared_f3) - 1;
 
+// deprecated
 struct shared_f3
 {
 private:
@@ -97,6 +98,18 @@ struct float3x3
 		result.mat[7] = mat[5];
 		result.mat[8] = mat[8];
 		return result;
+	}
+	inline __host__ __device__ void mad_column(const float3 v, float m, const int c)
+	{
+		mat[c * 3] += v.x * m;
+		mat[c * 3 + 1] += v.y * m;
+		mat[c * 3 + 2] += v.z * m;
+	}
+	inline __host__ __device__ void mad_row(const float3 v, float m, const int r)
+	{
+		mat[r] += v.x * m;
+		mat[r + 3] += v.y * m;
+		mat[r + 6] += v.z * m;
 	}
 	inline __host__ __device__ void set_column(const float3 v, const int c)
 	{
@@ -417,7 +430,7 @@ struct antisymmetric_float3x3 {
 	}
 };
 
-// Mainly for storage
+// Mainly for storage; deprecated
 #include <cuda_fp16.h>
 struct symmetric_half3x3 {
 	half2 _01, _23, _45;
@@ -447,6 +460,7 @@ struct symmetric_half3x3 {
 	}
 };
 
+// deprecated
 struct symmetric_shared_f3x3
 {
 	shared_f3 diag, off_diag;

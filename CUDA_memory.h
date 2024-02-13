@@ -54,6 +54,7 @@ struct smart_cpu_buffer
     {
         cpu_buffer_ptr = new T[max_size];
     }
+    size_t total_size() const { return dedicated_len * sizeof(T); }
 
     void destroy()
     {
@@ -71,6 +72,7 @@ struct smart_gpu_buffer
     T* gpu_buffer_ptr;
     bool created;
 
+    size_t total_size() const { return dedicated_len * sizeof(T); }
     void swap_pointers(smart_gpu_buffer<T>& other)
     {
         if (!dedicated_len == other.dedicated_len)
