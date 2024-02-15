@@ -250,7 +250,13 @@ struct BSSN_simulation {
 	smart_gpu_buffer<float>				  hamiltonian_constraint_violation; // H
 	smart_gpu_buffer<float3>			  momentum_constraint_violation; // M^i
 	smart_gpu_buffer<float3>			  conformal_christoffel_trace_constraint_violation; // G^i
-
+	void swap_old_new() {
+		old_conformal_christoffel_trace.swap_pointers(new_conformal_christoffel_trace);
+		old_extrinsic_curvature__lapse__conformal_factor.swap_pointers(new_extrinsic_curvature__lapse__conformal_factor);
+		old_traceless_conformal_extrinsic_curvature.swap_pointers(new_traceless_conformal_extrinsic_curvature);
+		old_shift_vector.swap_pointers(new_shift_vector);
+		old_conformal_metric.swap_pointers(new_conformal_metric);
+	}
 	BSSN_simulation(size_t simulation_domain_memory, size_t temporary_memory) : 
 		old_conformal_metric(smart_gpu_buffer<symmetric_float3x3>(simulation_domain_memory)),
 		old_traceless_conformal_extrinsic_curvature(smart_gpu_buffer<symmetric_float3x3>(simulation_domain_memory)),
