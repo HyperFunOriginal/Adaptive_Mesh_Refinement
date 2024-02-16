@@ -565,7 +565,7 @@ static cudaError_t AMR_refine_domain_batch(smart_gpu_buffer<T> buffer, smart_gpu
 	const dim3 blocks(ceilf(parent.domain_resolution.x * batch_size / 16.f), ceilf(parent.domain_resolution.y / 8.f), ceilf(parent.domain_resolution.z / 8.f));
 	const dim3 threads(min(parent.domain_resolution.x * batch_size, 16), min(parent.domain_resolution.y, 8), min(parent.domain_resolution.z, 8));
 
-	_refine_domain_batch<<<blocks, threads>>>(child_batch, buffer, batch_size, parent.domain_resolution, parent.stride);
+	_refine_domain_batch<T><<<blocks, threads>>>(child_batch.gpu_buffer_ptr, buffer, batch_size, parent.domain_resolution, parent.stride);
 	return cudaGetLastError();
 }
 
@@ -609,7 +609,6 @@ static cudaError_t AMR_copy_to(const smart_gpu_buffer<T>& old_buffer, smart_gpu_
 /////////////////////////////////////////////////////////////////////////////////////
 ///	AMR timestepping procedure (supply timesteping functions, 2 step integration) ///
 /////////////////////////////////////////////////////////////////////////////////////
-
 
 template<typename... Args>
 static void _recursive_timestep(void (*prestep)(parent_node&, float, float, int, Args...), void (*poststep)(parent_node&, float, float, int, Args...), const parent_node& parent, float timestep, float substep, const int depth, Args... args)

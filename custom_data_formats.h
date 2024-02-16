@@ -58,6 +58,7 @@ public:
 	__host__ __device__ explicit operator float3() const { return dec(); }
 };
 
+// Functional!
 struct float3x3
 {
 	float mat[9];
@@ -267,6 +268,19 @@ struct float3x3
 	inline __host__ __device__ float determinant() const {
 		return mat[0] * (mat[4] * mat[8] - mat[5] * mat[7]) - mat[3] * (mat[1] * mat[8] - mat[2] * mat[7]) + mat[6] * (mat[1] * mat[5] - mat[2] * mat[4]);
 	}
+	inline __host__ __device__ float3x3 inverse() const {
+		float3x3 result;
+		result.mat[0] = -mat[5] * mat[7] + mat[4] * mat[8];
+		result.mat[3] = mat[5] * mat[6] - mat[3] * mat[8];
+		result.mat[6] = -mat[4] * mat[6] + mat[3] * mat[7];
+		result.mat[1] = mat[2] * mat[7] - mat[1] * mat[8];
+		result.mat[4] = -mat[2] * mat[6] + mat[0] * mat[8];
+		result.mat[7] = mat[1] * mat[6] - mat[0] * mat[7];
+		result.mat[2] = -mat[2] * mat[4] + mat[1] * mat[5];
+		result.mat[5] = mat[2] * mat[3] - mat[0] * mat[5];
+		result.mat[8] = -mat[1] * mat[3] + mat[0] * mat[4];
+		return result / determinant();
+	}
 };
 
 /// <summary>
@@ -290,6 +304,7 @@ inline __host__ __device__ float3x3 identity_float3x3() {
 	return float3x3(make_float3(1, 0, 0), make_float3(0, 1, 0), make_float3(0, 0, 1));
 }
 
+// Functional!
 struct symmetric_float3x3 {
 	float3 diag, off_diag;
 
@@ -338,6 +353,18 @@ struct symmetric_float3x3 {
 		result.off_diag = off_diag / a;
 		return result;
 	}
+	inline __host__ __device__ symmetric_float3x3 sandwich_product(symmetric_float3x3 v) const
+	{
+		symmetric_float3x3 result;  
+		result.diag.x		= v.diag.x * (v.diag.x * diag.x + v.off_diag.x * off_diag.x + v.off_diag.y * off_diag.y) + v.off_diag.y * (diag.z * v.off_diag.y + v.diag.x * off_diag.y + v.off_diag.x * off_diag.z) + v.off_diag.x * (diag.y * v.off_diag.x + v.diag.x * off_diag.x + v.off_diag.y * off_diag.z);
+		result.diag.y		= v.off_diag.x * (diag.x * v.off_diag.x + v.diag.y * off_diag.x + off_diag.y * v.off_diag.z) + v.off_diag.z * (v.off_diag.x * off_diag.y + diag.z * v.off_diag.z + v.diag.y * off_diag.z) + v.diag.y * (v.diag.y * diag.y + v.off_diag.x * off_diag.x + v.off_diag.z * off_diag.z);
+		result.diag.z		= v.off_diag.y * (diag.x * v.off_diag.y + v.diag.z * off_diag.y + off_diag.x * v.off_diag.z) + v.off_diag.z * (off_diag.x * v.off_diag.y + diag.y * v.off_diag.z + v.diag.z * off_diag.z) + v.diag.z * (v.diag.z * diag.z + v.off_diag.y * off_diag.y + v.off_diag.z * off_diag.z);
+		result.off_diag.x	= v.off_diag.x * (v.diag.x * diag.x + v.off_diag.x * off_diag.x + v.off_diag.y * off_diag.y) + v.off_diag.z * (diag.z * v.off_diag.y + v.diag.x * off_diag.y + v.off_diag.x * off_diag.z) + v.diag.y * (diag.y * v.off_diag.x + v.diag.x * off_diag.x + v.off_diag.y * off_diag.z);
+		result.off_diag.y	= v.off_diag.y * (v.diag.x * diag.x + v.off_diag.x * off_diag.x + v.off_diag.y * off_diag.y) + v.diag.z * (diag.z * v.off_diag.y + v.diag.x * off_diag.y + v.off_diag.x * off_diag.z) + v.off_diag.z * (diag.y * v.off_diag.x + v.diag.x * off_diag.x + v.off_diag.y * off_diag.z);
+		result.off_diag.z	= v.off_diag.y * (diag.x * v.off_diag.x + v.diag.y * off_diag.x + off_diag.y * v.off_diag.z) + v.diag.z * (v.off_diag.x * off_diag.y + diag.z * v.off_diag.z + v.diag.y * off_diag.z) + v.off_diag.z * (v.diag.y * diag.y + v.off_diag.x * off_diag.x + v.off_diag.z * off_diag.z);
+		return result;
+	}
+	inline __host__ __device__ symmetric_float3x3(float3 diag, float3 off_diag) : diag(diag), off_diag(off_diag) {}
 	inline __host__ __device__ symmetric_float3x3() : diag(), off_diag() {}
 	inline __host__ __device__ symmetric_float3x3(float3x3 a) : diag(a.diag()) {
 		off_diag.x = (a.mat[1] + a.mat[3]) * .5f;
@@ -356,9 +383,31 @@ struct symmetric_float3x3 {
 		result.mat[6] = off_diag.y;
 		result.mat[7] = off_diag.z;
 		result.mat[8] = diag.z;
+		return result;
 	}
 	inline __host__ __device__ float determinant() const {
 		return diag.x * (diag.y * diag.z - off_diag.z * off_diag.z) - off_diag.x * (off_diag.x * diag.z - off_diag.y * off_diag.z) + off_diag.y * (off_diag.x * off_diag.z - off_diag.y * diag.y);
+	}
+	inline __host__ __device__ symmetric_float3x3 adjugate() const {
+		return symmetric_float3x3(make_float3(diag.y * diag.z - off_diag.z * off_diag.z,
+			diag.x * diag.z - off_diag.y * off_diag.y,
+			diag.x * diag.y - off_diag.x * off_diag.x),
+			make_float3(-diag.z * off_diag.x + off_diag.y * off_diag.z,
+				-diag.y * off_diag.y + off_diag.x * off_diag.z,
+				off_diag.x * off_diag.y - diag.x * off_diag.z));
+	}
+	inline __host__ __device__ symmetric_float3x3 inverse() const {
+		return adjugate() / determinant();
+	}
+	inline __host__ __device__ void force_unit_det()
+	{
+		float d = cbrtf(1.f / determinant());
+		diag *= d; off_diag *= d;
+	}
+	inline __host__ __device__ void force_traceless(symmetric_float3x3 metric, symmetric_float3x3 inv_metric)
+	{
+		float trace = (dot(inv_metric.diag, diag) + dot(inv_metric.off_diag, off_diag) * 2.f) / 3.f;
+		diag -= metric.diag * trace; off_diag -= metric.off_diag * trace;
 	}
 };
 
@@ -371,13 +420,12 @@ struct symmetric_float3x3 {
 inline __host__ __device__ float vectorised_dot(symmetric_float3x3 a, symmetric_float3x3 b) { 
 	return dot(a.diag, b.diag) + dot(a.off_diag, b.off_diag) * 2.f;
 }
-inline __host__ __device__ symmetric_float3x3 identity() 
+inline __host__ __device__ symmetric_float3x3 identity_sfloat3x3() 
 {
-	symmetric_float3x3 result;
-	result.diag = make_float3(1.f);
-	return result;
+	return symmetric_float3x3(make_float3(1.f), make_float3(0.f));
 }
 
+// Functional!
 struct antisymmetric_float3x3 {
 	float3 off_diag;
 
@@ -429,6 +477,9 @@ struct antisymmetric_float3x3 {
 		return 0.f;
 	}
 };
+inline __host__ __device__ float vectorised_dot(antisymmetric_float3x3 a, antisymmetric_float3x3 b) {
+	return dot(a.off_diag, b.off_diag) * 2.f;
+}
 
 // Mainly for storage; deprecated
 #include <cuda_fp16.h>
@@ -483,7 +534,7 @@ static_assert(sizeof(symmetric_shared_f3x3) == 8, "Wrong padding!!!");
 
 std::string to_string(float3x3 mat)
 {
-	return "[ " + to_string(mat.row(0)) + " ]\n[" + to_string(mat.row(1)) + " ]\n[" + to_string(mat.row(2)) + " ]\n";
+	return "[ " + to_string(mat.row(0)) + " ]\n[ " + to_string(mat.row(1)) + " ]\n[ " + to_string(mat.row(2)) + " ]\n";
 }
 
 #endif

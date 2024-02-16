@@ -9,6 +9,8 @@
 
 #include <stdio.h>
 
+// nvcc -ptx "C:\Users\junya\source\repos\Adaptive_Mesh_Refinement\kernel.cu" -ccbin "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.29.30133\bin\Hostx64\x64"
+
 constexpr int max_lacunarity = 1 << 6;
 constexpr int batch_size = 1 << 6;
 constexpr int gpu_alloc_var = 1 << 20;
@@ -23,33 +25,31 @@ void sleep_forever()
         _sleep(1000000);
 }
 
-void check_regenerate_refine(BSSN_simulation& simulation, parent_node& tree, smart_gpu_cpu_buffer<octree_node_gpu>& temp_buffer, smart_gpu_cpu_buffer<octree_boundary_gpu>& boundaries) 
+void check_regenerate(BSSN_simulation& simulation, parent_node& tree, smart_gpu_cpu_buffer<octree_node_gpu>& domains, smart_gpu_cpu_buffer<octree_node_gpu>& temp_buffer, smart_gpu_cpu_buffer<octree_boundary_gpu>& boundaries)
 {
     if (!tree.is_dirty())
         return;
 
     int a = 0;
-    tree.regenerate_boundaries();
     for (int l = tree.domains.size(), i = tree.new_child_index_start; i < l; i++)
-        if (tree.domains[i] != nullptr)
-            if (tree.domains[i]->newly_born())
-            {
-                temp_buffer.cpu_buffer_ptr[a] = octree_node_gpu(tree.domains[i]);
-                a++;
-            }
-    temp_buffer.copy_to_gpu();
+        if (tree.domains[i] != nullptr && tree.domains[i]->newly_born())
+            temp_buffer.cpu_buffer_ptr[a++] = octree_node_gpu(tree.domains[i]);
 
-    AMR_refine_domain_batch(simulation.old_conformal_christoffel_trace, temp_buffer, tree, a);
-    AMR_refine_domain_batch(simulation.old_conformal_metric, temp_buffer, tree, a);
-    AMR_refine_domain_batch(simulation.old_extrinsic_curvature__lapse__conformal_factor, temp_buffer, tree, a);
-    AMR_refine_domain_batch(simulation.old_shift_vector, temp_buffer, tree, a);
-    AMR_refine_domain_batch(simulation.old_traceless_conformal_extrinsic_curvature, temp_buffer, tree, a);
-}
+    if (a != 0)
+    {
+        temp_buffer.copy_to_gpu();
+        AMR_refine_domain_batch(simulation.old_conformal_christoffel_trace, temp_buffer, tree, a);
+        AMR_refine_domain_batch(simulation.old_conformal_metric, temp_buffer, tree, a);
+        AMR_refine_domain_batch(simulation.old_extrinsic_curvature__lapse__conformal_factor, temp_buffer, tree, a);
+        AMR_refine_domain_batch(simulation.old_shift_vector, temp_buffer, tree, a);
+        AMR_refine_domain_batch(simulation.old_traceless_conformal_extrinsic_curvature, temp_buffer, tree, a);
+    }
 
-void check_regenerate(BSSN_simulation& simulation, parent_node& tree, smart_gpu_cpu_buffer<octree_node_gpu>& domains, smart_gpu_cpu_buffer<octree_boundary_gpu>& boundaries)
-{
     if (tree.removed_children < max_lacunarity)
+    {
+        tree.regenerate_boundaries();
         return;
+    }
 
     tree.regenerate_domains();
     AMR_yield_buffers(tree, domains, boundaries, true);
@@ -64,13 +64,17 @@ void check_regenerate(BSSN_simulation& simulation, parent_node& tree, smart_gpu_
 
 int main()
 {
+    symmetric_float3x3 mat = symmetric_float3x3(float3x3(make_float3(1, -1, 0), make_float3(0, 1, 2), make_float3(-1, 1, 2)));
+    printf((to_string(mat.cast_f3x3()) + "\n").c_str());
+    printf(to_string(mat.inverse().cast_f3x3()).c_str());
+
     cudaError_t cudaStatus = cudaSetDevice(0);
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?");
         sleep_forever();
         return 1;
     }
-    
+
     parent_node parent = parent_node(make_uint3(domain_size));
     parent.add_child(parent.root, 0);
     parent.add_child(parent.root, 1);
@@ -78,7 +82,7 @@ int main()
     parent.add_child(parent.root, 2);
     parent.add_child(parent.root, 5);
     parent.add_child(parent.root, 6);
-    parent.add_child(parent.root, 4);
+    parent.add_child(parent.add_child(parent.root, 4), 1);
     parent.regenerate_boundaries();
 
     BSSN_simulation simulation = BSSN_simulation(gpu_alloc_var, (size_t)parent.stride * batch_size);
@@ -107,7 +111,7 @@ int main()
         sleep_forever();
         return 1;
     }
-    
+
     sleep_forever();
     return 0;
 }

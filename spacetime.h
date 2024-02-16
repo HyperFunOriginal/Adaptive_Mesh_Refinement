@@ -13,14 +13,14 @@ inline __host__ __device__ float trace(symmetric_float3x3 cotensor, symmetric_fl
 	return dot(cotensor.diag, cotensor.diag) + dot(inverse_metric.off_diag, inverse_metric.off_diag) * 2.f;
 }
 /// <summary>
-/// Returns T^ij
+/// Returns T_ij T^ij
 /// </summary>
 /// <param name="cotensor">T_ij</param>
 /// <param name="inverse_metric">g^ij</param>
 /// <returns></returns>
-inline __host__ __device__ symmetric_float3x3 raise_both_index(symmetric_float3x3 cotensor, symmetric_float3x3 inverse_metric) {
-	float3x3 inv = inverse_metric.cast_f3x3();
-	return symmetric_float3x3(inv * cotensor.cast_f3x3() * inv);
+inline __host__ __device__ float self_trace(float3x3 cotensor, symmetric_float3x3 inverse_metric) {
+	float3x3 temp = inverse_metric.cast_f3x3() * cotensor;
+	return (temp * temp).trace();
 }
 /// <summary>
 /// Returns T_ij T^ij
@@ -29,8 +29,7 @@ inline __host__ __device__ symmetric_float3x3 raise_both_index(symmetric_float3x
 /// <param name="inverse_metric">g^ij</param>
 /// <returns></returns>
 inline __host__ __device__ float self_trace(symmetric_float3x3 cotensor, symmetric_float3x3 inverse_metric) {
-	float3x3 temp = inverse_metric.cast_f3x3() * cotensor.cast_f3x3();
-	return (temp * temp).trace();
+	return trace(cotensor.sandwich_product(inverse_metric), cotensor);
 }
 /// <summary>
 /// Returns U^iV^j
@@ -49,10 +48,7 @@ inline __host__ __device__ float3x3 tensor_product(float3 u, float3 v)
 /// <returns></returns>
 inline __host__ __device__ symmetric_float3x3 self_tensor_product(float3 v)
 {
-	symmetric_float3x3 result;
-	result.diag = v * v;
-	result.off_diag = make_float3(v.x * v.y, v.x * v.z, v.y * v.z);
-	return result;
+	return symmetric_float3x3(v*v, make_float3(v.x * v.y, v.x * v.z, v.y * v.z));
 }
 
 struct symmetric_3_tensor {
@@ -88,6 +84,7 @@ struct symmetric_3_tensor {
 };
 static_assert(sizeof(symmetric_3_tensor) == 72, "Wrong padding!!!");
 
+// Functional!
 struct christoffel_symbols
 {
 	/// <summary>
@@ -184,6 +181,11 @@ struct christoffel_symbols
 };
 static_assert(sizeof(christoffel_symbols) == 72, "Wrong padding!!!");
 
+std::string to_string(christoffel_symbols christoffel)
+{
+	return to_string(christoffel.components[0].cast_f3x3()) + "\n\n" + to_string(christoffel.components[1].cast_f3x3()) + "\n\n" + to_string(christoffel.components[2].cast_f3x3());
+}
+
 // Storage; Deprecated
 struct christoffel_symbols_shared_f3
 {
@@ -207,14 +209,44 @@ struct christoffel_symbols_shared_f3
 };
 static_assert(sizeof(christoffel_symbols_shared_f3) == 24, "Wrong padding!!!");
 
+__device__ constexpr float central_difference_order_6[7] = { -1.f / 60, 3.f / 20, -3.f / 4, 0.f, 3.f / 4, -3.f / 20, 1.f / 60 };
+
 inline __host__ __device__ symmetric_float3x3 second_covariant_differential_lapse(christoffel_symbols symbols, symmetric_float3x3 second_deriv, float3 diff_a, float3 diff_w, symmetric_float3x3 metric, symmetric_float3x3 inverse_metric, float W)
 {
 	return (symbols.covariant_derivative_covariant_symmetric(second_deriv, diff_a) * W + symmetric_float3x3(tensor_product(diff_a, diff_w)) * 2.f - metric * dot(diff_a, inverse_metric.cast_f3x3() * diff_w)) * W;
 }
-inline __host__ __device__ symmetric_float3x3 conformal_factor_ricci_tensor(christoffel_symbols symbols, symmetric_float3x3 second_deriv, float3 diff_w, symmetric_float3x3 metric, symmetric_float3x3 inverse_metric, float W)
+inline __host__ __device__ symmetric_float3x3 conformal_factor_ricci_tensor(christoffel_symbols symbols, symmetric_float3x3 second_deriv, float3 diff_w, symmetric_float3x3 metric, symmetric_float3x3 inverse_metric, float W, float& out_laplacian_W)
 {
-	symmetric_float3x3 conformal_covariant = symbols.covariant_derivative_covariant_symmetric(second_deriv, diff_w) * W;
-	return metric * (trace(conformal_covariant, inverse_metric) - dot(diff_w, inverse_metric.cast_f3x3() * diff_w) * 2.f) + conformal_covariant;
+	symmetric_float3x3 conformal_covariant = symbols.covariant_derivative_covariant_symmetric(second_deriv, diff_w);
+	out_laplacian_W = trace(conformal_covariant, inverse_metric);
+	return metric * (trace(conformal_covariant * W, inverse_metric) - dot(diff_w, inverse_metric.cast_f3x3() * diff_w) * 2.f) + (conformal_covariant * W);
+}
+inline __host__ __device__ symmetric_float3x3 conformal_ricci_tensor(christoffel_symbols symbols, symmetric_float3x3 laplacian_metric, float3x3 differential_cGi, symmetric_float3x3 metric, symmetric_float3x3 inverse_metric)
+{
+	float3 analytic_cGi = symbols.bssn_analytic_constraint_variable(inverse_metric);
+	christoffel_symbols lowered = symbols.change_first_index(metric);
+	float3x3 inv_met = inverse_metric.cast_f3x3();
+
+	float3x3 result = (differential_cGi * metric.cast_f3x3()) + float3x3(lowered.components[0].cast_f3x3() * analytic_cGi, lowered.components[1].cast_f3x3() * analytic_cGi, lowered.components[2].cast_f3x3() * analytic_cGi);
+	result += float3x3(symbols.components[0].cast_f3x3() * inv_met * lowered.components[0].cast_f3x3().row(0), symbols.components[0].cast_f3x3() * inv_met * lowered.components[1].cast_f3x3().row(0), symbols.components[0].cast_f3x3() * inv_met * lowered.components[2].cast_f3x3().row(0)) * 2.f;
+	result += float3x3(symbols.components[1].cast_f3x3() * inv_met * lowered.components[0].cast_f3x3().row(1), symbols.components[1].cast_f3x3() * inv_met * lowered.components[1].cast_f3x3().row(1), symbols.components[1].cast_f3x3() * inv_met * lowered.components[2].cast_f3x3().row(1)) * 2.f;
+	result += float3x3(symbols.components[2].cast_f3x3() * inv_met * lowered.components[0].cast_f3x3().row(2), symbols.components[2].cast_f3x3() * inv_met * lowered.components[1].cast_f3x3().row(2), symbols.components[2].cast_f3x3() * inv_met * lowered.components[2].cast_f3x3().row(2)) * 2.f;
+
+	result += symbols.components[0].cast_f3x3() * inv_met * lowered.components[0].cast_f3x3();
+	result += symbols.components[1].cast_f3x3() * inv_met * lowered.components[1].cast_f3x3();
+	result += symbols.components[2].cast_f3x3() * inv_met * lowered.components[2].cast_f3x3();
+
+	return symmetric_float3x3(result) - (laplacian_metric * .5f);
+}
+inline __host__ __device__ void to_non_conformal(christoffel_symbols& original, float W, float3 diff_w, symmetric_float3x3 metric, float3x3 inverse_metric)
+{
+	diff_w /= W;
+	original.components[0] -= symmetric_float3x3(float3x3(diff_w, make_float3(0.f), make_float3(0.f))) * 2.f;
+	original.components[1] -= symmetric_float3x3(float3x3(make_float3(0.f), diff_w, make_float3(0.f))) * 2.f;
+	original.components[2] -= symmetric_float3x3(float3x3(make_float3(0.f), make_float3(0.f), diff_w)) * 2.f;
+	original.components[0] -= metric * dot(diff_w, inverse_metric.column(0));
+	original.components[1] -= metric * dot(diff_w, inverse_metric.column(1));
+	original.components[2] -= metric * dot(diff_w, inverse_metric.column(2));
 }
 
 struct BSSN_simulation {
@@ -250,13 +282,6 @@ struct BSSN_simulation {
 	smart_gpu_buffer<float>				  hamiltonian_constraint_violation; // H
 	smart_gpu_buffer<float3>			  momentum_constraint_violation; // M^i
 	smart_gpu_buffer<float3>			  conformal_christoffel_trace_constraint_violation; // G^i
-	void swap_old_new() {
-		old_conformal_christoffel_trace.swap_pointers(new_conformal_christoffel_trace);
-		old_extrinsic_curvature__lapse__conformal_factor.swap_pointers(new_extrinsic_curvature__lapse__conformal_factor);
-		old_traceless_conformal_extrinsic_curvature.swap_pointers(new_traceless_conformal_extrinsic_curvature);
-		old_shift_vector.swap_pointers(new_shift_vector);
-		old_conformal_metric.swap_pointers(new_conformal_metric);
-	}
 	BSSN_simulation(size_t simulation_domain_memory, size_t temporary_memory) : 
 		old_conformal_metric(smart_gpu_buffer<symmetric_float3x3>(simulation_domain_memory)),
 		old_traceless_conformal_extrinsic_curvature(smart_gpu_buffer<symmetric_float3x3>(simulation_domain_memory)),
@@ -282,6 +307,13 @@ struct BSSN_simulation {
 		momentum_constraint_violation(smart_gpu_buffer<float3>(temporary_memory)),
 		conformal_christoffel_trace_constraint_violation(smart_gpu_buffer<float3>(temporary_memory))
 	{ }
+	void swap_old_new() {
+		old_conformal_christoffel_trace.swap_pointers(new_conformal_christoffel_trace);
+		old_extrinsic_curvature__lapse__conformal_factor.swap_pointers(new_extrinsic_curvature__lapse__conformal_factor);
+		old_traceless_conformal_extrinsic_curvature.swap_pointers(new_traceless_conformal_extrinsic_curvature);
+		old_shift_vector.swap_pointers(new_shift_vector);
+		old_conformal_metric.swap_pointers(new_conformal_metric);
+	}
 	void destroy()
 	{
 		old_conformal_metric.destroy(); // cYij
@@ -313,5 +345,18 @@ struct BSSN_simulation {
 		conformal_christoffel_trace_constraint_violation.destroy(); // G^i
 	}
 };
+
+// Constraint helper functions
+
+#define CONSTRAINT_DAMP_CHRISTOFFEL 1.f
+inline __host__ __device__ float3 constraint_christoffel_damp_var(float3x3 shift_der, float extrinsic_curvature, float lapse, symmetric_float3x3 traceless_extrinsic_curvature)
+{
+	float temp_var = 2.f * (shift_der.trace() - 2.f * lapse * extrinsic_curvature) / 3.f;
+	return ((1.f + CONSTRAINT_DAMP_CHRISTOFFEL) * fmaxf(make_float3(temp_var) - shift_der.diag() - 2.f * traceless_extrinsic_curvature.diag * lapse / 5.f, make_float3(0.f))) + temp_var;
+}
+inline __host__ __device__ float hamiltonian_constraint_violation(symmetric_float3x3 conformal_ricci, symmetric_float3x3 inverse_metric, float extrinsic_curvature, symmetric_float3x3 traceless_extrinsic_curvature, float ADM_rho, float vacuum_energy)
+{
+	return trace(conformal_ricci, inverse_metric) + 2.f * extrinsic_curvature * extrinsic_curvature / 3.f - self_trace(traceless_extrinsic_curvature, inverse_metric) - 50.2654824574f * ADM_rho - 2.f * vacuum_energy;
+}
 
 #endif

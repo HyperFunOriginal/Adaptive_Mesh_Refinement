@@ -2053,15 +2053,15 @@ inline __host__ __device__ int4 sign(float4 a, int low, int high)
 
 inline __host__ __device__ int2 round_intf(float2 a)
 {
-    return make_int2(roundf(a.x), roundf(a.y));
+    return make_int2(rintf(a.x), rintf(a.y));
 }
 inline __host__ __device__ int3 round_intf(float3 a)
 {
-    return make_int3(roundf(a.x), roundf(a.y), roundf(a.z));
+    return make_int3(rintf(a.x), rintf(a.y), rintf(a.z));
 }
 inline __host__ __device__ int4 round_intf(float4 a)
 {
-    return make_int4(roundf(a.x), roundf(a.y), roundf(a.z), roundf(a.w));
+    return make_int4(rintf(a.x), rintf(a.y), rintf(a.z), rintf(a.w));
 }
 
 
