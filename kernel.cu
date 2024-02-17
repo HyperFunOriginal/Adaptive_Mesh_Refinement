@@ -9,8 +9,6 @@
 
 #include <stdio.h>
 
-// nvcc -ptx "C:\Users\junya\source\repos\Adaptive_Mesh_Refinement\kernel.cu" -ccbin "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.29.30133\bin\Hostx64\x64"
-
 constexpr int max_lacunarity = 1 << 6;
 constexpr int batch_size = 1 << 6;
 constexpr int gpu_alloc_var = 1 << 20;
@@ -64,10 +62,6 @@ void check_regenerate(BSSN_simulation& simulation, parent_node& tree, smart_gpu_
 
 int main()
 {
-    symmetric_float3x3 mat = symmetric_float3x3(float3x3(make_float3(1, -1, 0), make_float3(0, 1, 2), make_float3(-1, 1, 2)));
-    printf((to_string(mat.cast_f3x3()) + "\n").c_str());
-    printf(to_string(mat.inverse().cast_f3x3()).c_str());
-
     cudaError_t cudaStatus = cudaSetDevice(0);
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?");
@@ -75,29 +69,7 @@ int main()
         return 1;
     }
 
-    parent_node parent = parent_node(make_uint3(domain_size));
-    parent.add_child(parent.root, 0);
-    parent.add_child(parent.root, 1);
-    parent.add_child(parent.root, 3);
-    parent.add_child(parent.root, 2);
-    parent.add_child(parent.root, 5);
-    parent.add_child(parent.root, 6);
-    parent.add_child(parent.add_child(parent.root, 4), 1);
-    parent.regenerate_boundaries();
-
-    BSSN_simulation simulation = BSSN_simulation(gpu_alloc_var, (size_t)parent.stride * batch_size);
-    smart_gpu_cpu_buffer<octree_node_gpu> temp = smart_gpu_cpu_buffer<octree_node_gpu>(gpu_alloc_dom);
-
-    smart_gpu_cpu_buffer<octree_node_gpu> domains = smart_gpu_cpu_buffer<octree_node_gpu>(gpu_alloc_dom);
-    smart_gpu_cpu_buffer<octree_boundary_gpu> boundaries = smart_gpu_cpu_buffer<octree_boundary_gpu>(gpu_alloc_bds);
-
-    AMR_yield_buffers(parent, domains, boundaries, true);
     sleep_forever();
-
-    temp.destroy();
-    boundaries.destroy();
-    domains.destroy();
-    parent.destroy();
 
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "kernel program failed!");

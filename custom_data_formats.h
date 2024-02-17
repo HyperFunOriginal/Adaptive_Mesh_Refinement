@@ -325,6 +325,19 @@ struct symmetric_float3x3 {
 		off_diag /= a;
 	}
 
+	inline __host__ __device__ float3 row0() const
+	{
+		return make_float3(diag.x, off_diag.x, off_diag.y);
+	}
+	inline __host__ __device__ float3 row1() const
+	{
+		return make_float3(off_diag.x, diag.y, off_diag.z);
+	}
+	inline __host__ __device__ float3 row2() const
+	{
+		return make_float3(off_diag.y, off_diag.z, diag.z);
+	}
+	
 	inline __host__ __device__ symmetric_float3x3 operator-(const symmetric_float3x3 a) const
 	{
 		symmetric_float3x3 result;

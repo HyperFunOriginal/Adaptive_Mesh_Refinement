@@ -80,6 +80,35 @@ struct symmetric_3_tensor {
 		components[1] /= a;
 		components[2] /= a;
 	}
+	
+	inline __host__ __device__ symmetric_3_tensor operator+(const symmetric_3_tensor a) {
+		symmetric_3_tensor result;
+		result.components[0] = components[0] + a.components[0];
+		result.components[1] = components[1] + a.components[1];
+		result.components[2] = components[2] + a.components[2];
+		return result;
+	}
+	inline __host__ __device__ symmetric_3_tensor operator-(const symmetric_3_tensor a) {
+		symmetric_3_tensor result;
+		result.components[0] = components[0] - a.components[0];
+		result.components[1] = components[1] - a.components[1];
+		result.components[2] = components[2] - a.components[2];
+		return result;
+	}
+	inline __host__ __device__ symmetric_3_tensor operator*(const float a) {
+		symmetric_3_tensor result;
+		result.components[0] = components[0] * a;
+		result.components[1] = components[1] * a;
+		result.components[2] = components[2] * a;
+		return result;
+	}
+	inline __host__ __device__ symmetric_3_tensor operator/(const float a) {
+		symmetric_3_tensor result;
+		result.components[0] = components[0] / a;
+		result.components[1] = components[1] / a;
+		result.components[2] = components[2] / a;
+		return result;
+	}
 
 };
 static_assert(sizeof(symmetric_3_tensor) == 72, "Wrong padding!!!");
@@ -282,7 +311,10 @@ struct BSSN_simulation {
 	smart_gpu_buffer<float>				  hamiltonian_constraint_violation; // H
 	smart_gpu_buffer<float3>			  momentum_constraint_violation; // M^i
 	smart_gpu_buffer<float3>			  conformal_christoffel_trace_constraint_violation; // G^i
-	BSSN_simulation(size_t simulation_domain_memory, size_t temporary_memory) : 
+	
+	float domain_size;
+
+	BSSN_simulation(size_t simulation_domain_memory, size_t temporary_memory, float domain_size) :
 		old_conformal_metric(smart_gpu_buffer<symmetric_float3x3>(simulation_domain_memory)),
 		old_traceless_conformal_extrinsic_curvature(smart_gpu_buffer<symmetric_float3x3>(simulation_domain_memory)),
 		old_extrinsic_curvature__lapse__conformal_factor(smart_gpu_buffer<float3>(simulation_domain_memory)),
@@ -305,7 +337,7 @@ struct BSSN_simulation {
 		conformal_projected_ricci_tensor(smart_gpu_buffer<symmetric_float3x3>(temporary_memory)),
 		hamiltonian_constraint_violation(smart_gpu_buffer<float>(temporary_memory)),
 		momentum_constraint_violation(smart_gpu_buffer<float3>(temporary_memory)),
-		conformal_christoffel_trace_constraint_violation(smart_gpu_buffer<float3>(temporary_memory))
+		conformal_christoffel_trace_constraint_violation(smart_gpu_buffer<float3>(temporary_memory)), domain_size(domain_size)
 	{ }
 	void swap_old_new() {
 		old_conformal_christoffel_trace.swap_pointers(new_conformal_christoffel_trace);
@@ -357,6 +389,10 @@ inline __host__ __device__ float3 constraint_christoffel_damp_var(float3x3 shift
 inline __host__ __device__ float hamiltonian_constraint_violation(symmetric_float3x3 conformal_ricci, symmetric_float3x3 inverse_metric, float extrinsic_curvature, symmetric_float3x3 traceless_extrinsic_curvature, float ADM_rho, float vacuum_energy)
 {
 	return trace(conformal_ricci, inverse_metric) + 2.f * extrinsic_curvature * extrinsic_curvature / 3.f - self_trace(traceless_extrinsic_curvature, inverse_metric) - 50.2654824574f * ADM_rho - 2.f * vacuum_energy;
+}
+inline __host__ __device__ float3 momentum_constraint_violation(symmetric_float3x3(&diff_cAij)[3], symmetric_float3x3 inverse_metric, float3 diff_K, float3 diff_lnW, symmetric_float3x3 cAij, float3 ADM_Ji)
+{
+	return diff_cAij[0].cast_f3x3() * inverse_metric.row0() + diff_cAij[1].cast_f3x3() * inverse_metric.row1() + diff_cAij[2].cast_f3x3() * inverse_metric.row2() - 2.f * diff_K / 3.f - cAij.cast_f3x3() * diff_lnW * 3.f - ADM_Ji * 25.1327412287f;
 }
 
 #endif

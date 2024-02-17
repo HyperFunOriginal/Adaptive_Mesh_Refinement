@@ -1666,7 +1666,7 @@ inline __device__ __host__ int2 random_int2(const int2 seed)
 inline __device__ __host__ float2 random_float2(int2 seed)
 {
     seed = random_int2(seed);
-    return make_float2(seed.x, seed.y) / 2147483648.f;
+    return make_float2(seed) / 2147483648.f;
 }
 
 inline __device__ __host__ int3 random_int3(const int3 seed)
@@ -1678,7 +1678,7 @@ inline __device__ __host__ int3 random_int3(const int3 seed)
 inline __device__ __host__ float3 random_float3(int3 seed)
 {
     seed = random_int3(seed);
-    return make_float3(seed.x, seed.y, seed.z) / 2147483648.f;
+    return make_float3(seed) / 2147483648.f;
 }
 
 inline __device__ __host__ int4 random_int4(const int4 seed)
@@ -1690,7 +1690,7 @@ inline __device__ __host__ int4 random_int4(const int4 seed)
 inline __device__ __host__ float4 random_float4(int4 seed)
 {
     seed = random_int4(seed);
-    return make_float4(seed.x, seed.y, seed.z, seed.w) / 2147483648.f;
+    return make_float4(seed) / 2147483648.f;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
