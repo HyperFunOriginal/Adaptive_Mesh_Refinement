@@ -6,8 +6,8 @@
 /// <summary>
 /// Returns T^i_i
 /// </summary>
-/// <param name="cotensor">T_ij</param>
-/// <param name="inverse_metric">g^ij</param>
+/// <param name="cotensor:">T_ij</param>
+/// <param name="inverse_metric:">g^ij</param>
 /// <returns></returns>
 inline __host__ __device__ float trace(symmetric_float3x3 cotensor, symmetric_float3x3 inverse_metric) {
 	return dot(cotensor.diag, cotensor.diag) + dot(inverse_metric.off_diag, inverse_metric.off_diag) * 2.f;
@@ -15,8 +15,8 @@ inline __host__ __device__ float trace(symmetric_float3x3 cotensor, symmetric_fl
 /// <summary>
 /// Returns T_ij T^ij
 /// </summary>
-/// <param name="cotensor">T_ij</param>
-/// <param name="inverse_metric">g^ij</param>
+/// <param name="cotensor:">T_ij</param>
+/// <param name="inverse_metric:">g^ij</param>
 /// <returns></returns>
 inline __host__ __device__ float self_trace(float3x3 cotensor, symmetric_float3x3 inverse_metric) {
 	float3x3 temp = inverse_metric.cast_f3x3() * cotensor;
@@ -25,8 +25,8 @@ inline __host__ __device__ float self_trace(float3x3 cotensor, symmetric_float3x
 /// <summary>
 /// Returns T_ij T^ij
 /// </summary>
-/// <param name="cotensor">T_ij</param>
-/// <param name="inverse_metric">g^ij</param>
+/// <param name="cotensor:">T_ij</param>
+/// <param name="inverse_metric:">g^ij</param>
 /// <returns></returns>
 inline __host__ __device__ float self_trace(symmetric_float3x3 cotensor, symmetric_float3x3 inverse_metric) {
 	return trace(cotensor.sandwich_product(inverse_metric), cotensor);
@@ -34,8 +34,8 @@ inline __host__ __device__ float self_trace(symmetric_float3x3 cotensor, symmetr
 /// <summary>
 /// Returns U^iV^j
 /// </summary>
-/// <param name="row">U^i</param>
-/// <param name="column">V^j</param>
+/// <param name="row:">U^i</param>
+/// <param name="column:">V^j</param>
 /// <returns></returns>
 inline __host__ __device__ float3x3 tensor_product(float3 u, float3 v) 
 {
@@ -44,7 +44,7 @@ inline __host__ __device__ float3x3 tensor_product(float3 u, float3 v)
 /// <summary>
 /// Returns V^i V^j
 /// </summary>
-/// <param name="v">V^(i/j)</param>
+/// <param name="v:">V^(i/j)</param>
 /// <returns></returns>
 inline __host__ __device__ symmetric_float3x3 self_tensor_product(float3 v)
 {
@@ -312,9 +312,8 @@ struct BSSN_simulation {
 	smart_gpu_buffer<float3>			  momentum_constraint_violation; // M^i
 	smart_gpu_buffer<float3>			  conformal_christoffel_trace_constraint_violation; // G^i
 	
-	float domain_size;
 
-	BSSN_simulation(size_t simulation_domain_memory, size_t temporary_memory, float domain_size) :
+	BSSN_simulation(size_t simulation_domain_memory, size_t temporary_memory) :
 		old_conformal_metric(smart_gpu_buffer<symmetric_float3x3>(simulation_domain_memory)),
 		old_traceless_conformal_extrinsic_curvature(smart_gpu_buffer<symmetric_float3x3>(simulation_domain_memory)),
 		old_extrinsic_curvature__lapse__conformal_factor(smart_gpu_buffer<float3>(simulation_domain_memory)),
@@ -337,7 +336,7 @@ struct BSSN_simulation {
 		conformal_projected_ricci_tensor(smart_gpu_buffer<symmetric_float3x3>(temporary_memory)),
 		hamiltonian_constraint_violation(smart_gpu_buffer<float>(temporary_memory)),
 		momentum_constraint_violation(smart_gpu_buffer<float3>(temporary_memory)),
-		conformal_christoffel_trace_constraint_violation(smart_gpu_buffer<float3>(temporary_memory)), domain_size(domain_size)
+		conformal_christoffel_trace_constraint_violation(smart_gpu_buffer<float3>(temporary_memory))
 	{ }
 	void swap_old_new() {
 		old_conformal_christoffel_trace.swap_pointers(new_conformal_christoffel_trace);
@@ -393,6 +392,35 @@ inline __host__ __device__ float hamiltonian_constraint_violation(symmetric_floa
 inline __host__ __device__ float3 momentum_constraint_violation(symmetric_float3x3(&diff_cAij)[3], symmetric_float3x3 inverse_metric, float3 diff_K, float3 diff_lnW, symmetric_float3x3 cAij, float3 ADM_Ji)
 {
 	return diff_cAij[0].cast_f3x3() * inverse_metric.row0() + diff_cAij[1].cast_f3x3() * inverse_metric.row1() + diff_cAij[2].cast_f3x3() * inverse_metric.row2() - 2.f * diff_K / 3.f - cAij.cast_f3x3() * diff_lnW * 3.f - ADM_Ji * 25.1327412287f;
+}
+
+
+inline __host__ __device__ float bowen_york_conformal_psi(float3 relative_position, float mass)
+{
+	return 1.f + mass / max(1E-8f, 2.f * length(relative_position));
+}
+
+inline __host__ __device__ float bowen_york_criteria(float3 relative_position, float voxel_size, float mass)
+{
+	return mass * 2.f / max(0.0001f, dot(relative_position, relative_position) - voxel_size * voxel_size * .75f);
+}
+
+inline __host__ __device__ float donut_conformal_psi(float3 relative_position, float mass, float major_rad)
+{
+	float r = sqrt(relative_position.x * relative_position.x + relative_position.y * relative_position.y); float r2 = r - major_rad; r += major_rad;
+	r = arithmetic_geometric_mean(sqrt(r * r + relative_position.z * relative_position.z), sqrt(r2 * r2 + relative_position.z * relative_position.z));
+	return 1.f + mass / max(1E-8f, 2.f * r);
+}
+
+inline __host__ __device__ float donut_criteria(float3 relative_position, float voxel_size, float mass, float major_rad)
+{
+	float r = sqrt(relative_position.x * relative_position.x + relative_position.y * relative_position.y) - major_rad;
+	return mass / max(0.0001f, r * r + relative_position.z * relative_position.z - voxel_size * voxel_size * .75);
+}
+
+inline __host__ __device__ float soft_criteria(float3 relative_position, float voxel_size, float mass, float soft_radius)
+{
+	return mass / max(0.0001f, dot(relative_position, relative_position) + soft_radius * soft_radius - voxel_size * voxel_size * .75);
 }
 
 #endif

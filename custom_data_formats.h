@@ -366,6 +366,10 @@ struct symmetric_float3x3 {
 		result.off_diag = off_diag / a;
 		return result;
 	}
+	/// <summary>
+	/// Computes vMv
+	/// </summary>
+	/// <param name="v:">symmetric 3x3 matrix or tensor</param>
 	inline __host__ __device__ symmetric_float3x3 sandwich_product(symmetric_float3x3 v) const
 	{
 		symmetric_float3x3 result;  

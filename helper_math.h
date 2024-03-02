@@ -1850,10 +1850,10 @@ inline __device__ __host__ uint4 wzxy(const uint4 a) { return make_uint4(a.w, a.
 inline __device__ __host__ uint4 wxzy(const uint4 a) { return make_uint4(a.w, a.x, a.z, a.y); }
 
 
-inline __device__ __host__ int flatten(int3 index, int3 domain_size) { index = clamp(index, make_int3(0), domain_size - make_int3(1)); return index.x + index.y * domain_size.x + index.z * domain_size.y * domain_size.x; }
-inline __device__ __host__ int flatten(uint3 index, uint3 domain_size) { index = min(index, domain_size - make_uint3(1)); return int(index.x + index.y * domain_size.x + index.z * domain_size.y * domain_size.x); }
-inline __device__ __host__ uint3 unflatten(uint flat, uint3 domain_size) {
-    return make_uint3(flat % domain_size.x, (flat / domain_size.x) % domain_size.y, flat / (domain_size.x * domain_size.y));
+inline __device__ __host__ int flatten(int3 index, int domain_size) { index = clamp(index, make_int3(0), make_int3(domain_size - 1)); return index.x + index.y * domain_size + index.z * domain_size * domain_size; }
+inline __device__ __host__ int flatten(uint3 index, uint domain_size) { index = min(index, make_uint3(domain_size - 1)); return int(index.x + index.y * domain_size + index.z * domain_size * domain_size); }
+inline __device__ __host__ uint3 unflatten(uint flat, uint domain_size) {
+    return make_uint3(flat % domain_size, (flat / domain_size) % domain_size, flat / (domain_size * domain_size));
 }
 
 
@@ -2065,7 +2065,161 @@ inline __host__ __device__ int4 round_intf(float4 a)
 }
 
 
+inline __host__ __device__ int2 mod(int2 a, int2 b)
+{
+    return make_int2(a.x % b.x, a.y % b.y);
+}
+
+inline __host__ __device__ int3 mod(int3 a, int3 b)
+{
+    return make_int3(a.x % b.x, a.y % b.y, a.z % b.z);
+}
+
+inline __host__ __device__ int4 mod(int4 a, int4 b)
+{
+    return make_int4(a.x % b.x, a.y % b.y, b.z % b.z, b.w % b.w);
+}
+
+inline __host__ __device__ uint2 mod(uint2 a, uint2 b)
+{
+    return make_uint2(a.x % b.x, a.y % b.y);
+}
+
+inline __host__ __device__ uint3 mod(uint3 a, uint3 b)
+{
+    return make_uint3(a.x % b.x, a.y % b.y, a.z % b.z);
+}
+
+inline __host__ __device__ uint4 mod(uint4 a, uint4 b)
+{
+    return make_uint4(a.x % b.x, a.y % b.y, a.z % b.z, a.w % b.w);
+}
 
 
+inline __host__ __device__ float arithmetic_geometric_mean(float a, float b)
+{
+    float ta = 0.f;
+#pragma unroll
+    for (int i = 0; i < 30; i++)
+    {
+        ta = sqrtf(a * b);
+        b = (a + b) * .5f;
+        a = ta;
+    }
+    return (a + b) * .5f;
+}
 
+// EllipticK[k]
+inline __host__ __device__ float elliptic_integral_first_kind_mathematica(float k)
+{
+    return 1.57079632679f / arithmetic_geometric_mean(1.f, sqrtf(1.f - k));
+}
+
+// Integral from 0 to pi/2 of 1/Sqrt(1-k^2sin^2(x)) dx
+inline __host__ __device__ float elliptic_integral_first_kind(float k)
+{
+    return elliptic_integral_first_kind_mathematica(k * k);
+}
+
+// erf(x)
+inline __host__ __device__ float erf_lossy(float x)
+{
+    const int sgn = signbit(x); x = fabsf(x); float temp = x * x;
+    x = 1.f + 0.278393f * x + 0.230389f * temp + 0.000972 * temp * x + 0.078108 * temp * temp; x *= x; x *= x;
+    return (1.f - 1.f / x) * sgn;
+}
+
+
+inline __host__ __device__ int global_max(int2 a)
+{
+    return a.x > a.y ? a.x : a.y;
+}
+
+inline __host__ __device__ int global_min(int2 a)
+{
+    return a.x < a.y ? a.x : a.y;
+}
+
+inline __host__ __device__ uint global_max(uint2 a)
+{
+    return a.x > a.y ? a.x : a.y;
+}
+
+inline __host__ __device__ uint global_min(uint2 a)
+{
+    return a.x < a.y ? a.x : a.y;
+}
+
+inline __host__ __device__ float global_max(float2 a)
+{
+    return a.x > a.y ? a.x : a.y;
+}
+
+inline __host__ __device__ float global_min(float2 a)
+{
+    return a.x < a.y ? a.x : a.y;
+}
+
+
+inline __host__ __device__ float global_max(float3 a)
+{
+    return fmaxf(a.x, fmaxf(a.y, a.z));
+}
+
+inline __host__ __device__ float global_min(float3 a)
+{
+    return fminf(a.x, fminf(a.y, a.z));
+}
+
+inline __host__ __device__ float global_max(float4 a)
+{
+    return fmaxf(a.x, fmaxf(a.y, fmaxf(a.z, a.w)));
+}
+
+inline __host__ __device__ float global_min(float4 a)
+{
+    return fminf(a.x, fminf(a.y, fminf(a.z, a.w)));
+}
+
+
+inline __host__ __device__ int global_max(int3 a)
+{
+    return max(a.x, max(a.y, a.z));
+}
+
+inline __host__ __device__ int global_min(int3 a)
+{
+    return min(a.x, min(a.y, a.z));
+}
+
+inline __host__ __device__ int global_max(int4 a)
+{
+    return max(a.x, max(a.y, max(a.z, a.w)));
+}
+
+inline __host__ __device__ int global_min(int4 a)
+{
+    return min(a.x, min(a.y, min(a.z, a.w)));
+}
+
+
+inline __host__ __device__ uint global_max(uint3 a)
+{
+    return max(a.x, max(a.y, a.z));
+}
+
+inline __host__ __device__ uint global_min(uint3 a)
+{
+    return min(a.x, min(a.y, a.z));
+}
+
+inline __host__ __device__ uint global_max(uint4 a)
+{
+    return max(a.x, max(a.y, max(a.z, a.w)));
+}
+
+inline __host__ __device__ uint global_min(uint4 a)
+{
+    return min(a.x, min(a.y, min(a.z, a.w)));
+}
 #endif

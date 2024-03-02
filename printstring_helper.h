@@ -5,7 +5,7 @@
 #include "helper_math.h"
 #include <string>
 
-std::string print_graph(float* arr, const int& len, const float& min_val, const float& max_val, const unsigned int& subdivisions)
+std::string print_graph(float* arr, const int len, const float min_val, const float max_val, const unsigned int subdivisions)
 {
 	std::string result = "";
 	const float subdivisionWidth = (max_val - min_val) / (2.0f * subdivisions);
@@ -19,6 +19,24 @@ std::string print_graph(float* arr, const int& len, const float& min_val, const 
 	result += "\n###";
 	for (int j = 0; j < len; j++)
 		result += "#";
+	return result;
+}
+
+constexpr char ascii_shade[92] = { 32, 96, 46, 45, 39, 58, 95, 44, 94, 61, 59, 62, 60, 43, 33, 114, 99, 42, 47, 122, 63, 115, 76, 84, 118, 41, 74, 55, 40, 124, 70, 105, 123, 67, 125, 102, 73, 51, 49, 116, 108, 117, 91, 110, 101, 111, 90, 53, 89, 120, 106, 121, 97, 93, 50, 69, 83, 119, 113, 107, 80, 54, 104, 57, 100, 52, 86, 112, 79, 71, 98, 85, 65, 75, 88, 72, 109, 56, 82, 68, 35, 36, 66, 103, 48, 77, 78, 87, 81, 37, 38, 64 };
+
+std::string print_img(float* arr, const int len_x, const int len_y, const float min_val, const float max_val)
+{
+	std::string result = "";
+	for (int y = 0; y < len_y; y++)
+	{
+		for (int x = 0; x < len_x; x++)
+		{
+			int indexer = clamp((int)((arr[x + y * len_x] - min_val) / (max_val - min_val) * 92.f + random_float(x + y * len_x + len_y)), 0, 91);
+			result += ascii_shade[indexer];
+			result += ascii_shade[indexer];
+		}
+		result += "\n";
+	}
 	return result;
 }
 
