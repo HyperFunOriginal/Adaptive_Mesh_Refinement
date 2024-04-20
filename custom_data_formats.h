@@ -549,7 +549,7 @@ static_assert(sizeof(symmetric_half3x3) == 12, "Wrong padding!!!");
 static_assert(sizeof(antisymmetric_float3x3) == 12, "Wrong padding!!!");
 static_assert(sizeof(symmetric_shared_f3x3) == 8, "Wrong padding!!!");
 
-std::string to_string(float3x3 mat)
+static std::string to_string(float3x3 mat)
 {
 	return "[ " + to_string(mat.row(0)) + " ]\n[ " + to_string(mat.row(1)) + " ]\n[ " + to_string(mat.row(2)) + " ]\n";
 }

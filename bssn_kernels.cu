@@ -1,0 +1,28 @@
+#ifndef BSSN_KERNELS
+#define BSSN_KERNELS
+
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+
+#include "adaptive_mesh.cu"
+#include "spacetime.h"
+
+///////////////////////////////////////////////////////
+/// 					To note:					///
+///////////////////////////////////////////////////////
+///		1. Apply coarsening after every timestep	///
+///		2. Refine before each substep if needed		///
+///		*3. Amortize kernel invoke if possible		///
+///		*4. Maximise memory access coalescence		///
+///////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////
+/// 					To do:						///
+///////////////////////////////////////////////////////
+///				1. Differentiation					///
+///				2. Numerical Relativity				///
+///						??? ???						///
+///				?.		PROFIT!!!					///
+///////////////////////////////////////////////////////
+
+#endif

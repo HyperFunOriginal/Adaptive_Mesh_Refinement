@@ -154,6 +154,69 @@ struct smart_gpu_cpu_buffer : smart_gpu_buffer<T>
     }
 };
 
+template <class T, uint num_buff>
+struct gpu_cpu_multibuffer
+{
+    int temp_data;
+    const size_t dedicated_len;
+    T* gpu_buffer_ptr[num_buff];
+    T* cpu_buffer_ptr[num_buff];
+    bool created;
+
+    size_t total_size() const { return dedicated_len * sizeof(T) * num_buff; }
+
+    gpu_cpu_multibuffer(size_t max_size) : dedicated_len(max_size), temp_data(0)
+    {
+        created = true;
+        for (int i = 0; i < num_buff; i++)
+        {
+            gpu_buffer_ptr[i] = 0;
+            cpu_buffer_ptr[i] = new T[max_size];
+            if (cuda_alloc_buffer(&gpu_buffer_ptr[i], dedicated_len) != cudaSuccess)
+            {
+                destroy();
+                break;
+            }
+        }
+    }
+    cudaError_t copy_to_cpu(const uint idx)
+    {
+        return cuda_copyfromgpu_buffer<T>(cpu_buffer_ptr[idx], gpu_buffer_ptr[idx], dedicated_len);
+    }
+    cudaError_t copy_to_gpu(const uint idx)
+    {
+        return cuda_copytogpu_buffer<T>(cpu_buffer_ptr[idx], gpu_buffer_ptr[idx], dedicated_len);
+    }
+
+    virtual void destroy()
+    {
+        if (created)
+            for (int i = 0; i < num_buff; i++)
+            {
+                cudaFree(gpu_buffer_ptr[i]);
+                delete[] cpu_buffer_ptr[i];
+            }
+        created = false;
+    }
+};
+
+
+template <class T>
+cudaError_t copy_to_cpu(const smart_gpu_buffer<T>& a, smart_cpu_buffer<T>& b)
+{
+    if (a.dedicated_len != b.dedicated_len)
+        return cudaErrorInvalidHostPointer;
+    return cuda_copyfromgpu_buffer<T>(b.cpu_buffer_ptr, a.gpu_buffer_ptr, a.dedicated_len);
+}
+
+template <class T>
+cudaError_t copy_to_gpu(smart_gpu_buffer<T>& a, const smart_cpu_buffer<T>& b)
+{
+    if (a.dedicated_len != b.dedicated_len)
+        return cudaErrorInvalidDevicePointer;
+    return cuda_copytogpu_buffer<T>(b.cpu_buffer_ptr, a.gpu_buffer_ptr, a.dedicated_len);
+}
+
 template<typename... Args>
 static cudaError_t cuda_invoke_kernel(void (*kernel) (Args...), const dim3& blocks, const dim3& threads, Args... args)
 {

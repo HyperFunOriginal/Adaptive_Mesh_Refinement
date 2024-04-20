@@ -55,7 +55,7 @@
     </Link>
     <CudaCompile>
       <TargetMachinePlatform>64</TargetMachinePlatform>
-      <MaxRegCount>64</MaxRegCount>
+      <MaxRegCount>128</MaxRegCount>
       <PtxAsOptionV>false</PtxAsOptionV>
     </CudaCompile>
   </ItemDefinitionGroup>
@@ -80,15 +80,20 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <CudaCompile Include="adaptive_mesh.cu" />
+    <CudaCompile Include="bssn_kernels.cu" />
     <CudaCompile Include="kernel.cu" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="CUDA_memory.h" />
     <ClInclude Include="custom_data_formats.h" />
-    <ClInclude Include="Header.h" />
     <ClInclude Include="helper_math.h" />
+    <ClInclude Include="io_img_helper.h" />
+    <ClInclude Include="lodepng.h" />
     <ClInclude Include="printstring_helper.h" />
     <ClInclude Include="spacetime.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="lodepng.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
