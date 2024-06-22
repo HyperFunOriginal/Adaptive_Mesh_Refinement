@@ -1,499 +1,443 @@
 #ifndef ADAPTIVE_MESH
 #define ADAPTIVE_MESH
 
-#include "cuda_runtime.h"
+#include "CUDA_memory.h"
 #include "device_launch_parameters.h"
-
 #include "helper_math.h"
-#include <string>
+#include <cassert>
 #include <vector>
+#include <deque>
+#include <list>
 
 __device__ constexpr uint error_depth = 69u;
 __device__ constexpr uint tile_resolution = 16u;
-__device__ constexpr uint tile_stride = tile_resolution * tile_resolution * tile_resolution;
+__device__ constexpr uint tile_pad = 3u;
+__device__ constexpr uint total_tile_width = (tile_resolution + tile_pad * 2);
+__device__ constexpr uint total_tile_stride = total_tile_width * total_tile_width * total_tile_width;
 
 constexpr uint max_tree_depth = 8;
-constexpr uint gpu_dedicated_voxels = 1 << 20;
-
-constexpr uint gpu_alloc_nodes = gpu_dedicated_voxels / tile_stride;
-constexpr uint gpu_alloc_bds = gpu_alloc_nodes * 6;
+constexpr uint max_tiles_per_depth = 200;
+constexpr uint max_voxel_count_per_depth = total_tile_stride * max_tiles_per_depth;
 
 const int3 directions[6] = { make_int3(1, 0, 0), make_int3(0, 1, 0), make_int3(0, 0, 1), make_int3(-1, 0, 0), make_int3(0, -1, 0), make_int3(0, 0, -1) };
 
-///////////////////////////////////////////////////
-///				Auxillary Structs				///
-///////////////////////////////////////////////////
-
-struct octree_indexer
+// Octree Positioning System
+struct OPS
 {
 	uint data;
 
-	inline __device__ __host__ uint get_pos() const
-	{
+	__host__ __device__ OPS(uint depth, int parent_index, uint subdivision, int index) : data((parent_index << 21) | ((index & 2047) << 10) | ((depth & 127) << 3) | (subdivision & 7)) { }
+	__host__ __device__ OPS() : OPS(error_depth, -1, 0, -1) { }
+
+	__host__ __device__ int read_parent_index() const {
+		const int result = data >> 21;
+		return (result == 2047 ? -1 : result);
+	}
+	__host__ __device__ int read_index() const {
+		const int result = (data >> 10) & 2047;
+		return (result == 2047 ? -1 : result);
+	}
+	__host__ __device__ uint read_depth() const {
+		return (data >> 3) & 127;
+	}
+	__host__ __device__ uint read_subdivision() const {
 		return data & 7;
 	}
-	inline __device__ __host__ float3 get_pos_3D_float() const {
-		return make_float3(data & 1, (data >> 1) & 1, (data >> 2) & 1) - 0.5f;
+	__host__ __device__ uint3 read_subdivision_uint3() const {
+		return make_uint3((data & 4) >> 2, (data & 2) >> 1, data & 1);
 	}
-	inline __device__ __host__ int3 get_pos_3D() const
-	{
-		return make_int3(data & 1, (data >> 1) & 1, (data >> 2) & 1);
-	}
-	inline __device__ __host__ uint get_hidden_data() const
-	{
-		return data >> 3;
-	}
-	__device__ __host__ void set_hidden_data(uint dat)
-	{
-		data = (data & 7) | (dat << 3);
-	}
-	
-	inline __device__ __host__ octree_indexer(uint3 int_pos) : data((int_pos.x & 1) | ((int_pos.y & 1) << 1) | ((int_pos.z & 1) << 2)) {};
-	inline __device__ __host__ octree_indexer(uint pos) : data(pos) {};
-	///////////////////////////////////////////////////
-///////////////////////////////////////////////////
-};
-static_assert(sizeof(octree_indexer) == 4, "Wrong padding!!!");
-
-template <class T>
-struct var_pair
-{
-	T new_T, old_T;
-	__host__ __device__ void set_all(const T& newVal)
-	{
-		old_T = newVal;
-		new_T = newVal;
-	}
-	__host__ __device__ void set_new(const T& newVal)
-	{
-		old_T = new_T;
-		new_T = newVal;
+	__host__ __device__ int3 read_subdivision_int3() const {
+		return make_int3((data & 4) >> 2, (data & 2) >> 1, data & 1);
 	}
 
-	__host__ __device__ var_pair() : new_T(), old_T() {}
-	__host__ __device__ var_pair(T new_T, T old_T) : new_T(new_T), old_T(old_T) {}
-};
-static_assert(sizeof(var_pair<int>) == sizeof(int)*2, "Wrong padding!!!");
-
-struct hierarchy_dirtiness
-{
-	uint dirty_flags;
-	hierarchy_dirtiness() : dirty_flags(4294967295U) { }
-	bool is_dirty(const uint depth) const
+	__host__ __device__ void write_parent_index(int idx)
 	{
-		return (dirty_flags >> depth) & 1;
+		data &= 2097151;
+		data |= idx << 21;
 	}
-	void set_dirty(const uint depth, const bool dirty_state)
+	__host__ __device__ void write_index(int idx)
 	{
-		dirty_flags &= 4294967295U ^ (1U << depth);
-		dirty_flags |= dirty_state << depth;
+		data &= 4292871167;
+		data |= (idx & 2047) << 10;
+	}
+	__host__ __device__ void write_depth(uint depth)
+	{
+		data &= 4294966279;
+		data |= (depth & 127) << 3;
+	}
+	__host__ __device__ void write_subdivision(uint sub)
+	{
+		data &= 4294967288;
+		data |= sub & 7;
+	}
+
+	__host__ __device__ void invalidate()
+	{
+		data = error_depth << 3;
 	}
 };
+static_assert(sizeof(OPS) == 4, "Incorrect size!");
 
-///////////////////////////////////////////////////
-///					Octree Structs				///
-///////////////////////////////////////////////////
-
-struct octree_buffer_index
+// Octree node
+struct node
 {
-	var_pair<int> buffer_idx;
-	int hierarchy_index;
-	octree_buffer_index() : buffer_idx(-1,-1), hierarchy_index(-1) {}
-};
+	int children[8];
+	OPS pos;
 
-struct octree_node
-{
-	octree_node* parent;
-	octree_node* children[8];
-	octree_indexer offset_and_depth;
-	octree_buffer_index idx;
-
-	octree_node() : parent(nullptr), offset_and_depth(0), idx(), children()
+	void clear_children()
 	{
 		for (int i = 0; i < 8; i++)
-			children[i] = nullptr;
+			children[i] = -1;
 	}
-	~octree_node()
+	node() : children(), pos(0, -1, 0, 0)
 	{
-		for (int i = 0; i < 8; i++)
-			delete children[i];
+		clear_children();
 	}
-	
-	int depth() const { if (offset_and_depth.get_hidden_data() == error_depth) { return -1; }  return offset_and_depth.get_hidden_data(); }
-	bool remove_child(const octree_indexer offset)
+	node(int parent, uint depth, uint subdiv) : children(), pos(depth, parent, subdiv, 0)
 	{
-		if (children[offset.get_pos()] == nullptr)
-			return false;
-		delete children[offset.get_pos()];
-		children[offset.get_pos()] = nullptr;
-		return true;
+		clear_children();
 	}
-	octree_node* add_child(const octree_indexer offset)
+	node(const int _0) : children(), pos()
 	{
-		if (depth() == -1 || children[offset.get_pos()] != nullptr)
-			return nullptr;
-
-		octree_node* result = new octree_node();
-		result->parent = this;
-		result->offset_and_depth = offset;
-		result->offset_and_depth.set_hidden_data(depth() + 1);
-		children[offset.get_pos()] = result;
-
-		return result;
+		clear_children();
 	}
-
-	octree_node(const octree_node& node) = delete;
-	octree_node& operator=(const octree_node&& node) = delete;
 };
 
-struct octree_node_gpu
+// Boundary of nodes
+struct gpu_boundary
 {
-	octree_indexer offset_and_depth;
-	var_pair<int> index;
-	uint _children[4];
-	int parent;
-
-	__host__ __device__ void set_child(const uint offset, const int index)
-	{
-		_children[offset >> 1] &= 4294901760u >> ((offset & 1) * 16);
-		_children[offset >> 1] |= ((uint)index & 65536u) << ((offset & 1) * 16);
+	uint data; int3 pos;
+	__host__ __device__ gpu_boundary() : data((uint)(-1)), pos() { }
+	__host__ __device__ gpu_boundary(int index, int depth, int3 offset) : data(((uint)(depth << 20) & 4293918720u) | (index & 1048575u)), pos(offset) { }
+	__host__ __device__ int read_index() const {
+		const int temp = data & 1048575u;
+		return (temp == 1048575) ? -1 : temp;
 	}
-	__host__ __device__ int children(const uint offset) const
-	{
-		uint result = _children[offset >> 1];
-		result >>= (offset & 1) * 16;
-		return (result == 65535u) ? -1 : (int)result;
-	}
-	__host__ __device__ int depth() const { if (offset_and_depth.get_hidden_data() == error_depth) { return -1; }  return offset_and_depth.get_hidden_data(); }
-	octree_node_gpu(octree_node* node) : index(node->idx.buffer_idx.new_T, node->idx.buffer_idx.old_T), offset_and_depth(node->offset_and_depth)
-	{
-		parent = (node->parent == nullptr) ? -1 : node->parent->idx.buffer_idx.new_T;
-		for (int i = 0; i < 8; i++)
-			set_child(i, (node->children[i] == nullptr) ? -1 : node->children[i]->idx.buffer_idx.new_T);
-	}
-	__host__ __device__ octree_node_gpu() : index(), offset_and_depth(error_depth * 8), parent(-1) {
-		for (int i = 0; i < 4; i++)
-			_children[i] = 4294967295u;
+	__host__ __device__ int read_depth() const {
+		const int temp = (data >> 20);
+		return (temp == 4095u) ? error_depth : temp;
 	}
 };
-static_assert(sizeof(octree_node_gpu) == 32, "Wrong padding!!!");
 
-struct octree
+// Octree
+struct octree_allocator
 {
-	std::vector<octree_node*> buffer;
-	std::vector<std::vector<octree_node*>> hierarchy;
-	size_t node_slots, max_depth, removed_nodes;
-	hierarchy_dirtiness hierarchy_dirty;
+	std::deque<OPS> fresh;
+	std::list<OPS> invalidated;
+	std::vector<node> hierarchy[max_tree_depth];
+
+	smart_gpu_cpu_buffer<gpu_boundary> boundaries[max_tree_depth];
+	int hierarchy_restructuring;
 
 private:
-	bool dirty_boundary;
-	void _recursive_remove(octree_node* node)
+	int3 compute_absolute_position_offset(const node& node) const
 	{
-		for (int i = 0; i < 8; i++)
-			if (node->children[i] != nullptr)
-				_recursive_remove(node->children[i]);
-
-		buffer[node->idx.buffer_idx.new_T] = nullptr;
-		hierarchy[node->depth()][node->idx.hierarchy_index] = nullptr;
-		removed_nodes++;
+		if (node.pos.read_depth() == 0)
+			return int3();
+		return node.pos.read_subdivision_int3() + (compute_absolute_position_offset(hierarchy[node.pos.read_depth() - 1][node.pos.read_parent_index()]) * 2);
 	}
-	octree_node* _add_datastructure(octree_node* node)
+	int3 absolute_position_offset_signed(const node& node) const
 	{
-		if (node->depth() >= max_depth)
-		{
-			hierarchy.push_back(std::vector<octree_node*>());
-			max_depth++;
-		}
-
-		buffer.push_back(node);
-		node->idx.buffer_idx.set_new(node_slots);
-		node->idx.hierarchy_index = hierarchy[node->depth()].size();
-		hierarchy[node->depth()].push_back(node);
-
-		node_slots++;
-		return node;
-	}
-	void _recursive_add(octree_node* node)
-	{
-		_add_datastructure(node);
-		for (int i = 0; i < 8; i++)
-			if (node->children[i] != nullptr)
-				_recursive_add(node->children[i]);
-	}
-	
-	int3 _recursive_octree_index_position(octree_node* node, const int3 offset) const
-	{
-		if (node->parent == nullptr)
-			return offset + 1;
-		return node->offset_and_depth.get_pos_3D() + offset + (_recursive_octree_index_position(node->parent, make_int3(0)) << 1);
+		if (node.pos.read_depth() == 0)
+			return int3();
+		return (node.pos.read_subdivision_int3() * 2 - 1) + (absolute_position_offset_signed(hierarchy[node.pos.read_depth() - 1][node.pos.read_parent_index()]) * 2);
 	}
 
 public:
-	void set_bds_dirty(bool val) { dirty_boundary = val; }
-	bool is_dom_dirty() const { return hierarchy_dirty.dirty_flags != 0; }
-	bool is_bds_dirty() const { return dirty_boundary; }
-	void regenerate_nodes()
+	octree_allocator() : fresh(), invalidated(), hierarchy(), hierarchy_restructuring(-1), boundaries()
 	{
-		octree_node* root = buffer[0];
-		size_t temp = node_slots - removed_nodes;
-		buffer.clear();
-		hierarchy.clear();
-		buffer.reserve(temp > 1 ? temp : 1);
-		hierarchy.reserve(max_depth);
-
-		node_slots = 0;
-		removed_nodes = 0;
-		max_depth = 0;
-		dirty_boundary = true;
-		_recursive_add(root);
-	}
-	
-	void set_all_old()
-	{
-		for (int i = 0; i < node_slots; i++)
-			if (buffer[i] != nullptr)
-				buffer[i]->idx.buffer_idx.set_all(i);
-	}
-
-	bool remove_child(octree_node* child)
-	{
-		if (child == nullptr || buffer[child->idx.buffer_idx.new_T] == nullptr)
-			return false;
-
-		dirty_boundary = true;
-		hierarchy_dirty.set_dirty(child->depth(), true);
-		_recursive_remove(child);
-		return child->parent->remove_child(child->offset_and_depth);
-	}
-	octree_node* add_child(octree_node* parent, const octree_indexer offset)
-	{
-		if (parent == nullptr || parent->depth() + 1 >= max_tree_depth || node_slots >= gpu_alloc_nodes)
-			return nullptr;
-
-		octree_node* child = parent->add_child(offset);
-
-		if (child == nullptr)
-			return child;
-
-		dirty_boundary = true;
-		hierarchy_dirty.set_dirty(child->depth(), true);
-		return _add_datastructure(child);
-	}
-	
-	float3 octree_position(const octree_node* node) const
-	{
-		if (node->parent == nullptr)
-			return make_float3(0.f);
-		return node->offset_and_depth.get_pos_3D_float() + octree_position(node->parent) * 2.f;
-	}
-	uint3 octree_index_position(octree_node* node, const int3 offset) const
-	{
-		return make_uint3(_recursive_octree_index_position(node, offset)) << (31 - node->depth());
-	}
-	octree_node* find_node(uint3 offset, const int depth_limit) const
-	{
-		if ((offset.x & 2147483648u) == 0u || (offset.y & 2147483648u) == 0u || (offset.z & 2147483648u) == 0u)
-			return nullptr;
-
-		octree_node* result = buffer[0];
-		for (int i = 0; i < depth_limit; i++)
+		int test = -1;
+		assert(test >> 1 == -1);
+		for (int i = 0; i < max_tree_depth; i++)
 		{
-			offset.x <<= 1; offset.y <<= 1; offset.z <<= 1; const uint3 temp = (offset >> 31) & make_uint3(1u);
-			octree_node* child = result->children[temp.x | (temp.y << 1) | (temp.z << 2)];
-			if (child == nullptr) { return result; }
-			result = child;
+			boundaries[i] = smart_gpu_cpu_buffer<gpu_boundary>(min(max_tiles_per_depth, 1 << min(30, 3 * i)) * 6);
+			hierarchy[i].reserve(min(max_tiles_per_depth, 1 << min(30, 3 * i)));
 		}
-		return result;
+		hierarchy[0].push_back(node());
 	}
 
-	octree(octree_node* root) : node_slots(0), max_depth(0), removed_nodes(0), dirty_boundary(true) {
-		_recursive_add(root);
-	}
-	octree() : node_slots(1), max_depth(1), removed_nodes(0), dirty_boundary(true)
+	// Checks if a depth is marked out but still has room due to invalidated slots.
+	void check_for_restructure(const int depth_to_check)
 	{
-		buffer.resize(1);
-		hierarchy.resize(1);
-		hierarchy[0].resize(1);
-		hierarchy[0][0] = new octree_node();
-		buffer[0] = hierarchy[0][0];
-	}
-};
+		assert(hierarchy_restructuring == -1);
 
-struct domain_boundary_gpu
-{
-	uint target_and_rel_scale_log;
-	float3 rel_pos;
-
-	__host__ __device__ int target_index() const {
-		uint idx = target_and_rel_scale_log & 16777215u;
-		return idx == 16777215u ? -1 : idx;
+		for (int i = 0, s = hierarchy[depth_to_check].size(); i < s; i++)
+			if (hierarchy[depth_to_check][i].pos.read_depth() == error_depth)
+			{ 
+				// Still has room to spare, rearrange data to remove blank spaces
+				hierarchy_restructuring = depth_to_check;
+				return;
+			}
 	}
-	__host__ __device__ float rel_scale() const {
-		int sc = target_and_rel_scale_log & 4278190080u;
-		return exp2f((float)(sc >> 24));
-	}
-	domain_boundary_gpu(const octree_node* src, const octree_node* tgt, const octree& tree) : target_and_rel_scale_log(16777215u), rel_pos()
+	
+	// Add whatever arguments needed
+	template<class T>
+	void copy_all_data(const smart_gpu_cpu_buffer<int>& change_index, T& data, const int depth, const int num_nodes_final);
+	
+	// Get all nodes of a full depth to "move houses" to make room for new nodes. Deletes all invalidated nodes of the specified depth. Defragmentation
+	template<class T>
+	void restructure_data(T& data)
 	{
-		if (tgt == nullptr || src == nullptr)
-			return;
-		target_and_rel_scale_log = ((uint)tgt->idx.buffer_idx.new_T) & 16777215u;
-		rel_pos = (tree.octree_position(src) - tree.octree_position(tgt)) / (1u << tgt->depth());
-		target_and_rel_scale_log |= ((uint)(tgt->depth() - src->depth())) << 24;
-	}
-	__host__ __device__ domain_boundary_gpu() : target_and_rel_scale_log(16777215u), rel_pos() { }
-};
-static_assert(sizeof(domain_boundary_gpu) == 16, "Wrong padding!!!");
-
-///////////////////////////////////////////////////
-///				Array Handler Structs			///
-///////////////////////////////////////////////////
-
-#include "CUDA_memory.h"
-struct boundary_handler
-{
-	smart_gpu_cpu_buffer<domain_boundary_gpu> boundary;
-	boundary_handler() : boundary(gpu_alloc_bds) { }
-	void generate_boundaries(octree& tree, bool flush) {
-		if (!tree.is_bds_dirty())
+		if (hierarchy_restructuring == -1)
 			return;
 
-		for (int i = 0; i < tree.node_slots; i++)
+		for (std::list<OPS>::iterator i = invalidated.begin(), e = invalidated.end(); i != e; ++i)
+			if (i->read_depth() == hierarchy_restructuring)
+				i = invalidated.erase(i);
+
+		std::vector<node> temp; 
+		temp.reserve(min(max_tiles_per_depth, 1 << min(30, 3 * hierarchy_restructuring)));
+		size_t current_size = hierarchy[hierarchy_restructuring].size();
+		smart_gpu_cpu_buffer<int> index_change(current_size);
+		for (int i = 0, t = 0; i < current_size; i++)
 		{
-			octree_node* source = tree.buffer[i];
-			if (source == nullptr)
-				continue;
-
-			for (int j = 0; j < 6; j++)
+			node* curr = &hierarchy[hierarchy_restructuring][i];
+			if (curr->pos.read_depth() != error_depth)
 			{
-				const uint3 pos = tree.octree_index_position(source, directions[j]);
-				octree_node* target = tree.find_node(pos, source->depth());
-				boundary.cpu_buffer_ptr[i * 6 + j] = domain_boundary_gpu(source, target, tree);
+				curr->pos.write_index(t);
+				index_change.cpu_buffer_ptr[t] = i;
+				hierarchy[hierarchy_restructuring - 1][curr->pos.read_parent_index()].children[curr->pos.read_subdivision()] = t; // inform parents about move
+				for (int k = 0; k < 8; k++)
+					hierarchy[hierarchy_restructuring + 1][curr->children[k]].pos.write_parent_index(t); // inform children about move
+				temp.push_back(hierarchy[hierarchy_restructuring][i]); t++;
 			}
 		}
 
-		if (flush)
-			boundary.copy_to_gpu();
-		tree.set_bds_dirty(false);
+		index_change.copy_to_gpu();
+		copy_all_data(index_change, data, hierarchy_restructuring, temp.size());
+		hierarchy[hierarchy_restructuring] = temp;
+		hierarchy_restructuring = -1;
+		index_change.destroy();
 	}
-};
 
-struct domains_handler
-{
-	smart_gpu_cpu_buffer<octree_node_gpu> main_buffer;
-	gpu_cpu_multibuffer<octree_node_gpu, max_tree_depth> hierarchy;
-	int hierarchy_size[max_tree_depth];
-
-	cudaError_t refresh(const octree& tree)
+	// Adds a node to the octree - first checks if there is a free slot from an invalidated ndoe
+	node* add_node(node& parent, const uint subdivision)
 	{
-		cudaError_t error = cudaSuccess;
-		if (!tree.is_dom_dirty())
-			return error;
-		for (int i = 0; i < tree.max_depth; i++)
+		uint new_depth = parent.pos.read_depth() + 1;
+		if (new_depth >= max_tree_depth || parent.children[subdivision] != -1)
+			return nullptr;
+		if (hierarchy[new_depth].size() >= max_tiles_per_depth)
 		{
-			if (!tree.hierarchy_dirty.is_dirty(i))
-				continue;
-			hierarchy_size[i] = tree.hierarchy[i].size();
-			for (int j = 0; j < hierarchy_size[i]; j++)
-				hierarchy.cpu_buffer_ptr[i][j] = tree.hierarchy[i][j] == nullptr ? octree_node_gpu() : octree_node_gpu(tree.hierarchy[i][j]);
-			error = hierarchy.copy_to_gpu(i);
-			if (error != cudaSuccess) { return error; }
+			check_for_restructure(new_depth);
+			return nullptr;
 		}
-		for (int i = 0; i < tree.node_slots; i++)
-			main_buffer.cpu_buffer_ptr[i] = tree.buffer[i] == nullptr ? octree_node_gpu() : octree_node_gpu(tree.buffer[i]);
-		return main_buffer.copy_to_gpu();
+
+		uint index = parent.pos.read_index();
+		for (std::list<OPS>::iterator i = invalidated.begin(), e = invalidated.end(); i != e; ++i)
+		{
+			OPS data = *i;
+			if (data.read_parent_index() == index && data.read_depth() == new_depth && data.read_subdivision() == subdivision)
+			{
+				node* ptr = &hierarchy[new_depth][data.read_index()];
+				ptr->pos = data;
+				ptr->clear_children();
+
+				fresh.push_back(data);
+				invalidated.erase(i);
+				parent.children[subdivision] = data.read_index();
+
+				return ptr;
+			}
+		}
+
+		hierarchy[new_depth].push_back(node(index, new_depth, subdivision));
+		const size_t size = hierarchy[new_depth].size();
+
+		hierarchy[new_depth][size - 1].pos.write_index(size - 1);
+		fresh.push_back(hierarchy[new_depth][size - 1].pos);
+		parent.children[subdivision] = size - 1;
+		return &hierarchy[new_depth][size - 1];
 	}
-	domains_handler() : hierarchy(gpu_alloc_nodes), hierarchy_size(), main_buffer(gpu_alloc_nodes) {}
+	// Removes a node from the octree by marking it as invalidated
+	bool remove_node(node& node)
+	{
+		const int depth = node.pos.read_depth();
+		if (node.pos.read_parent_index() == -1) // deleted already or root
+			return false;
+		for (int i = 0; i < 8; i++)
+			if (node.children[i] != -1)
+				remove_node(hierarchy[depth + 1][node.children[i]]);
+
+		invalidated.push_back(node.pos);
+		hierarchy[depth - 1][node.pos.read_parent_index()].children[node.pos.read_subdivision()] = -1;
+		node.pos = OPS(error_depth, -1, 0, -1);
+		return true;
+	}
+
+	// Finds immediate neighbour/sibling in a certain direction, with units of multiples of node width
+	const node* find_neighbour(const node& n, const int3 dir) const {
+		if (n.pos.read_depth() == error_depth)
+			return nullptr;
+
+		int3 final_pos = compute_absolute_position_offset(n) + dir;
+		if (final_pos >> n.pos.read_depth() != int3())
+			return nullptr;
+		const node* temp_ptr = &hierarchy[0][0]; // root
+		for (int i = n.pos.read_depth() - 1, k = 1; i >= 0; i--, k++)
+		{
+			uint subdiv = (((final_pos.x >> i) & 1) << 2)
+						| (((final_pos.y >> i) & 1) << 1)
+						| ((final_pos.z >> i) & 1		);
+			if (temp_ptr->children[subdiv] != -1)
+				temp_ptr = &hierarchy[k][temp_ptr->children[subdiv]];
+			else
+				break;
+		}
+		return temp_ptr;
+	}
+	// Yields relative information about sibling or neighbour nodes
+	gpu_boundary boundary_info(const node& n, const int3 dir) const 
+	{
+		const node* ptr = find_neighbour(n, dir);
+		if (ptr == nullptr)
+			return gpu_boundary();
+		int depth_change = n.pos.read_depth() - ptr->pos.read_depth();
+		int3 abs_pos = absolute_position_offset_signed(*ptr) * (1 << depth_change) - absolute_position_offset_signed(n);
+		return gpu_boundary(ptr->pos.read_index(), depth_change, abs_pos);
+	}
+	// Generates all boundary information of a certain depth and copies it to the GPU
+	cudaError_t generate_boundaries(const int depth)
+	{
+		for (int i = 0, s = hierarchy[depth].size(); i < s; i++)
+			for (int j = 0; j < 6; j++)
+				boundaries[depth].cpu_buffer_ptr[i] = boundary_info(hierarchy[depth][i], directions[j]);
+		return boundaries[depth].copy_to_gpu();
+	}
 };
 
+static std::string tab_spacing(const int number)
+{
+	std::string result = "";
+	for (int i = 0; i < number; i++)
+		result += "	";
+	return result;
+}
+static std::string to_string(const node& root, const octree_allocator& tree, const int print_depth = 0)
+{
+	const int depth = root.pos.read_depth();
+	std::string temp = tab_spacing(print_depth);
+	if (depth == error_depth)
+		return temp + "Child does not exist.";
 
-inline __host__ __device__ int idx_raw(uint3 pos)
-{
-	return pos.x + (pos.y + pos.z * tile_resolution) * tile_resolution;
+	temp += "Node Index: " + std::to_string(root.pos.read_index()) +
+		"\n" + temp + "Depth: " + std::to_string(depth) +
+		"\n" + temp + "Parent Hierarchy Index: " + std::to_string(root.pos.read_parent_index()) +
+		"\n" + temp + "Subdivision: " + std::to_string(root.pos.read_subdivision()) + "\n\n";
+	for (int i = 0; i < 8; i++)
+		if (root.children[i] != -1)
+			temp += to_string(tree.hierarchy[depth + 1][root.children[i]], tree, print_depth + 1);
+	return temp;
 }
-inline __host__ __device__ int idx_clamp(uint3 pos)
+static std::string print_boundary_info(const node& n, const int3 dir, const octree_allocator& tree)
 {
-	pos = min(pos, make_uint3(tile_resolution));
-	return pos.x + (pos.y + pos.z * tile_resolution) * tile_resolution;
+	std::string temp = "Node with depth " + std::to_string(n.pos.read_depth()) + " and index " + std::to_string(n.pos.read_index()) + " has boundary along " + to_string(dir) + " to the following:\n";
+	gpu_boundary bdf = tree.boundary_info(n, dir);
+	if (bdf.read_depth() == error_depth)
+		return temp + "\nNo boundary";
+	temp += "\nNode Index: " + std::to_string(bdf.read_index());
+	temp += "\nRelative Depth: " + std::to_string(bdf.read_depth());
+	temp += "\nScaled Offset: " + to_string(make_float3(bdf.pos) / (1 << bdf.read_depth()));
+	return temp;
 }
-inline __host__ __device__ int idx_ex(uint3 pos)
+
+inline __host__ __device__ uint __index_full_raw(const uint3 idx)
 {
-	if (min(pos, make_uint3(tile_resolution)) != pos)
-		return -1;
-	return pos.x + (pos.y + pos.z * tile_resolution) * tile_resolution;
+	return idx.x + idx.y * total_tile_width + idx.z * total_tile_width * total_tile_width;
+}
+inline __host__ __device__ uint __index_int_raw(const uint3 idx)
+{
+	return __index_full_raw(idx + tile_pad);
+}
+// Inputs are unpadded positions, outputs in [0,1]³ if within main domain
+inline __host__ __device__ float3 __uvs(const uint3 idx)
+{
+	return make_float3(idx - tile_pad) / tile_resolution;
+}
+
+inline __host__ float3 debug_target_uvs(const uint3 idx, const gpu_boundary bdf)
+{
+	return (__uvs(idx) + make_float3(bdf.pos)) / (1 << bdf.read_depth());
+}
+
+// Octree-compatible evolution buffer
+template <class T>
+struct octree_duplex_hierarchical_buffer
+{
+	smart_gpu_cpu_buffer<T*> old_buffers;
+	smart_gpu_cpu_buffer<T*> new_buffers;
+
+	smart_gpu_buffer<T> buff1[max_tree_depth];
+	smart_gpu_buffer<T> buff2[max_tree_depth];
+
+	octree_duplex_hierarchical_buffer(const bool flush = true) : old_buffers(max_tree_depth), new_buffers(max_tree_depth)
+	{
+		for (int i = 0; i < max_tree_depth; i++)
+		{
+			buff1[i] = smart_gpu_buffer<T>(total_tile_stride * min(max_tiles_per_depth, 1 << min(30, 3 * i)));
+			buff2[i] = smart_gpu_buffer<T>(total_tile_stride * min(max_tiles_per_depth, 1 << min(30, 3 * i)));
+
+			old_buffers.cpu_buffer_ptr[i] = buff1[i].gpu_buffer_ptr;
+			new_buffers.cpu_buffer_ptr[i] = buff2[i].gpu_buffer_ptr;
+		}
+		if (flush)
+		{
+			old_buffers.copy_to_gpu();
+			new_buffers.copy_to_gpu();
+		}
+	}
+	void swap_buffers(const int depth)
+	{
+		T* temp = old_buffers.cpu_buffer_ptr[depth];
+		old_buffers.cpu_buffer_ptr[depth] = new_buffers.cpu_buffer_ptr[depth];
+		new_buffers.cpu_buffer_ptr[depth] = temp;
+
+		old_buffers.copy_to_gpu();
+		new_buffers.copy_to_gpu();
+	}
+};
+
+// Lerps within a tile. Assumes that uvs lies within 0 and 1 on each axis, and that start_index lies within the length of data
+template <class T>
+inline __host__ __device__ T __lerp_bilinear_data(const T* data, float3 uvs, const int start_index)
+{
+	uint start_idx = __index_full_raw(make_uint3(uvs * tile_resolution) + tile_pad) + start_index;
+	uvs = fracf(uvs * tile_resolution);
+
+	T result = T();
+	result += data[start_idx]																			* (1.f - uvs.x) * (1.f - uvs.y) * (1.f - uvs.z);
+	result += data[start_idx + 1]																		* uvs.x			* (1.f - uvs.y) * (1.f - uvs.z);
+	result += data[start_idx + total_tile_width]														* (1.f - uvs.x) * uvs.y			* (1.f - uvs.z);
+	result += data[start_idx + total_tile_width + 1]													* uvs.x			* uvs.y			* (1.f - uvs.z);
+	result += data[start_idx + total_tile_width * total_tile_width]										* (1.f - uvs.x) * (1.f - uvs.y) * uvs.z;
+	result += data[start_idx + total_tile_width * total_tile_width + 1]									* uvs.x			* (1.f - uvs.y) * uvs.z;
+	result += data[start_idx + total_tile_width * total_tile_width + total_tile_width]					* (1.f - uvs.x) * uvs.y			* uvs.z;
+	return result + data[start_idx + total_tile_width * total_tile_width + total_tile_width + 1]		* uvs.x			* uvs.y			* uvs.z;
 }
 
 template <class T>
-inline __host__ __device__ T lerp_buffer(const T* buffer, const uint3 pos, const float3 lerp_factor, const int offset)
-{
-	T result =		buffer[offset + idx_clamp(pos)]						  * (1.f - lerp_factor.x) * (1.f - lerp_factor.y) * (1.f - lerp_factor.z);
-	result  +=		buffer[offset + idx_clamp(pos + make_uint3(1, 0, 0))] *		  lerp_factor.x   * (1.f - lerp_factor.y) * (1.f - lerp_factor.z);
-	result  +=		buffer[offset + idx_clamp(pos + make_uint3(0, 1, 0))] * (1.f - lerp_factor.x) * lerp_factor.y		  * (1.f - lerp_factor.z);
-	result  +=		buffer[offset + idx_clamp(pos + make_uint3(1, 1, 0))] *		  lerp_factor.x   * lerp_factor.y		  * (1.f - lerp_factor.z);
-	result  +=		buffer[offset + idx_clamp(pos + make_uint3(0, 0, 1))] * (1.f - lerp_factor.x) * (1.f - lerp_factor.y) * lerp_factor.z;
-	result  +=		buffer[offset + idx_clamp(pos + make_uint3(1, 0, 1))] *		  lerp_factor.x   * (1.f - lerp_factor.y) * lerp_factor.z;
-	result  +=		buffer[offset + idx_clamp(pos + make_uint3(0, 1, 1))] * (1.f - lerp_factor.x) * lerp_factor.y		  * lerp_factor.z;
-	return result + buffer[offset + idx_clamp(pos + make_uint3(1, 1, 1))] * lerp_factor.x		  * lerp_factor.y		  * lerp_factor.z;
-}
-
-///////////////////////////////////////////////////
-///					AMR Functions				///
-///////////////////////////////////////////////////
-
-template <class T>
-__global__ void __coarsen_batch(const octree_node_gpu* nodes, T* buffer, const int num_nodes)
+__global__ void __copy_ghost_data(T** write, const T** read, const gpu_boundary* curr, int depth)
 {
 	uint3 idx = threadIdx + blockDim * blockIdx;
-	if (idx.x >= num_nodes * tile_resolution || idx.y >= tile_resolution || idx.z >= tile_resolution) { return; }
+	const uint node_idx = idx.z / (6 * tile_pad);
+	const uint border_idx = (idx.z / tile_pad) % 6u;
+	idx.z %= tile_pad;
 
-	const int node_index = idx.x / tile_resolution; idx.x -= node_index * tile_resolution;
-	const int child_idx = nodes[node_index].children(octree_indexer((idx << 1) / make_uint3(tile_resolution)).get_pos());
-	if (child_idx == -1) { return; }
+	if (border_idx >= 3)
+		idx.z = total_tile_width - idx.z - 1;
+	if (border_idx == 0 || border_idx == 3)
+		idx = make_uint3(idx.z, idx.x, idx.y);
+	else if (border_idx == 1 || border_idx == 4)
+		idx = make_uint3(idx.x, idx.z, idx.y);
 
-	buffer[idx_raw(idx) + nodes[node_index].index.new_T * tile_stride] = lerp_buffer<T>(buffer, mod(idx << 1, make_uint3(tile_resolution)), make_float3(0.5f), child_idx * tile_stride);
-}
+	const uint depth_bdf = curr[node_idx * 6 + border_idx].read_depth();
+	if (depth_bdf == error_depth)
+		return;
 
-template <class T>
-cudaError_t AMR_coarsen_hierarchy(domains_handler& handler, smart_gpu_buffer<T>& buffer, const int depth)
-{
-	const uint3 tgt = make_uint3(handler.hierarchy_size[depth] * tile_resolution, tile_resolution, tile_resolution);
-	const dim3 threads(min(tgt, make_uint3(8u)));
-	const dim3 blocks(make_uint3(ceilf(make_float3(tgt)/make_float3(threads))));
-	__coarsen_batch<<<blocks, threads>>>(handler.hierarchy.gpu_buffer_ptr[depth], buffer.gpu_buffer_ptr, handler.hierarchy_size[depth]);
-
-	return cuda_sync();
-}
-
-
-template <typename... Args>
-cudaError_t AMR_invoke_hierarchy(domains_handler& handler, void (*kernel) (const octree_node_gpu* nodes, const int, Args...), const int depth, Args... args)
-{
-	const uint3 tgt = make_uint3(handler.hierarchy_size[depth] * tile_resolution, tile_resolution, tile_resolution);
-	const dim3 threads(min(tgt, make_uint3(8u)));
-	const dim3 blocks(make_uint3(ceilf(make_float3(tgt) / make_float3(threads))));
-	kernel<<<blocks, threads>>> (handler.hierarchy.gpu_buffer_ptr[depth], handler.hierarchy_size[depth], args...);
-
-	return cuda_sync();
+	float3 target_uvs = (__uvs(idx) + make_float3(curr[node_idx * 6 + border_idx].pos)) / (1 << depth_bdf);
+	write[depth][__index_full_raw(idx) + node_idx * total_tile_stride] = __lerp_bilinear_data<T>(read[depth - depth_bdf], target_uvs, curr[node_idx * 6 + border_idx].read_index() * total_tile_stride);
 }
 
 
-template <class T>
-__global__ void __refine_single(const octree_node_gpu node, T* buffer)
-{
-	uint3 idx = threadIdx + blockDim * blockIdx;
-	if (idx.x >= tile_resolution || idx.y >= tile_resolution || idx.z >= tile_resolution) { return; }
-
-	const uint3 index = (idx + make_uint3(node.offset_and_depth.get_pos_3D()) * tile_resolution) >> 1;
-	buffer[idx_raw(idx) + node.index.new_T * tile_stride] = lerp_buffer<T>(buffer, index, make_float3(idx.x & 1, idx.y & 1, idx.z & 1) * .5f, node.parent * tile_stride);
-}
-
-template <class T>
-cudaError_t AMR_refine_single(domains_handler& handler, smart_gpu_buffer<T>& buffer, const int index)
-{
-	const uint3 tgt = make_uint3(tile_resolution);
-	const dim3 threads(min(tgt, make_uint3(4u)));
-	const dim3 blocks(make_uint3(ceilf(make_float3(tgt) / make_float3(threads))));
-	__coarsen_batch<<<blocks, threads>>>(handler.main_buffer.cpu_buffer_ptr[index], buffer.gpu_buffer_ptr);
-	return cudaGetLastError();
-}
+// Todo: Copying, Coarsening, Refinement
 
 #endif

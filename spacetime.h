@@ -3,7 +3,6 @@
 #define SPACETIME_H
 
 #include "custom_data_formats.h"
-#include "CUDA_memory.h"
 /// <summary>
 /// Returns T^i_i
 /// </summary>
@@ -249,7 +248,7 @@ inline __host__ __device__ symmetric_float3x3 conformal_factor_ricci_tensor(chri
 {
 	symmetric_float3x3 conformal_covariant = symbols.covariant_derivative_covariant_symmetric(second_deriv, diff_w);
 	out_laplacian_W = trace(conformal_covariant, inverse_metric);
-	return metric * (trace(conformal_covariant * W, inverse_metric) - dot(diff_w, inverse_metric.cast_f3x3() * diff_w) * 2.f) + (conformal_covariant * W);
+	return metric * (out_laplacian_W * W - dot(diff_w, inverse_metric.cast_f3x3() * diff_w) * 2.f) + (conformal_covariant * W);
 }
 inline __host__ __device__ symmetric_float3x3 conformal_ricci_tensor(christoffel_symbols symbols, symmetric_float3x3 laplacian_metric, float3x3 differential_cGi, symmetric_float3x3 conformal_metric)
 {
@@ -279,123 +278,13 @@ inline __host__ __device__ void to_non_conformal(christoffel_symbols& original, 
 	original.components[2] -= metric * dot(diff_w, inverse_metric.column(2));
 }
 
-struct BSSN_simulation {
-	// Memory usage: 168 * simulation_domain_memory + 400 * temporary_memory
-
-	// Field values
-	smart_gpu_buffer<symmetric_float3x3>  old_conformal_metric; // cYij
-	smart_gpu_buffer<symmetric_float3x3>  old_traceless_conformal_extrinsic_curvature; // cAij
-	smart_gpu_buffer<float3>			  old_extrinsic_curvature__lapse__conformal_factor; // K; a; W 
-	smart_gpu_buffer<float3>			  old_conformal_christoffel_trace; // cG^i
-	smart_gpu_buffer<float3>			  old_shift_vector; // b^i
-
-	smart_gpu_buffer<symmetric_float3x3>  new_conformal_metric; // cYij
-	smart_gpu_buffer<symmetric_float3x3>  new_traceless_conformal_extrinsic_curvature; // cAij
-	smart_gpu_buffer<float3>			  new_extrinsic_curvature__lapse__conformal_factor; // K; a; W 
-	smart_gpu_buffer<float3>			  new_conformal_christoffel_trace; // cG^i
-	smart_gpu_buffer<float3>			  new_shift_vector; // b^i
-
-	// Derivatives (only 1 simulation domain dedicated memory)
-	smart_gpu_buffer<symmetric_float3x3>  kreiss_oliger_conformal_metric; // cYij
-	smart_gpu_buffer<symmetric_float3x3>  kreiss_oliger_traceless_conformal_extrinsic_curvature; // cAij
-	smart_gpu_buffer<float3>			  kreiss_oliger_extrinsic_curvature__lapse__conformal_factor; // K; a; W 
-	smart_gpu_buffer<float3>			  kreiss_oliger_conformal_christoffel_trace; // cG^i
-	smart_gpu_buffer<float3>			  kreiss_oliger_shift_vector; // b^i
-
-	smart_gpu_buffer<float3>			  differential_conformal_factor; // d_i W
-	smart_gpu_buffer<float3>			  differential_extrinsic_curvature; // d_i K
-	smart_gpu_buffer<float3>			  differential_lapse; // d_i a
-	smart_gpu_buffer<float3x3>			  differential_shift_vector; // d_i b^j
-	smart_gpu_buffer<float3x3>			  differential_conformal_christoffel_trace; // d_i cG^j
-	smart_gpu_buffer<symmetric_3_tensor>  differential_traceless_conformal_extrinsic_curvature; // cAij,k
-	smart_gpu_buffer<symmetric_3_tensor>  differential_conformal_metric; // cYij,k
-
-	// Derived quantities (only 1 simulation domain dedicated memory)
-	smart_gpu_buffer<christoffel_symbols> christoffel; // G^i_jk
-	smart_gpu_buffer<symmetric_float3x3>  second_conformal_covariant_differential_lapse; // D_i D_j a
-	smart_gpu_buffer<symmetric_float3x3>  conformal_projected_ricci_tensor; // cRij
-
-	smart_gpu_buffer<float>				  hamiltonian_constraint_violation; // H
-	smart_gpu_buffer<float3>			  momentum_constraint_violation; // M^i
-	smart_gpu_buffer<float3>			  conformal_christoffel_trace_constraint_violation; // G^i
-	
-
-	BSSN_simulation(size_t simulation_domain_memory, size_t temporary_memory) :
-		old_conformal_metric(smart_gpu_buffer<symmetric_float3x3>(simulation_domain_memory)),
-		old_traceless_conformal_extrinsic_curvature(smart_gpu_buffer<symmetric_float3x3>(simulation_domain_memory)),
-		old_extrinsic_curvature__lapse__conformal_factor(smart_gpu_buffer<float3>(simulation_domain_memory)),
-		old_conformal_christoffel_trace(smart_gpu_buffer<float3>(simulation_domain_memory)),
-		old_shift_vector(smart_gpu_buffer<float3>(simulation_domain_memory)),
-		new_conformal_metric(smart_gpu_buffer<symmetric_float3x3>(simulation_domain_memory)),
-		new_traceless_conformal_extrinsic_curvature(smart_gpu_buffer<symmetric_float3x3>(simulation_domain_memory)),
-		new_extrinsic_curvature__lapse__conformal_factor(smart_gpu_buffer<float3>(simulation_domain_memory)),
-		new_conformal_christoffel_trace(smart_gpu_buffer<float3>(simulation_domain_memory)),
-		new_shift_vector(smart_gpu_buffer<float3>(simulation_domain_memory)),
-		kreiss_oliger_conformal_metric(smart_gpu_buffer<symmetric_float3x3>(temporary_memory)),
-		kreiss_oliger_traceless_conformal_extrinsic_curvature(smart_gpu_buffer<symmetric_float3x3>(temporary_memory)),
-		kreiss_oliger_extrinsic_curvature__lapse__conformal_factor(smart_gpu_buffer<float3>(temporary_memory)),
-		kreiss_oliger_conformal_christoffel_trace(smart_gpu_buffer<float3>(temporary_memory)),
-		kreiss_oliger_shift_vector(smart_gpu_buffer<float3>(temporary_memory)),
-		differential_conformal_factor(smart_gpu_buffer<float3>(temporary_memory)),
-		differential_extrinsic_curvature(smart_gpu_buffer<float3>(temporary_memory)),
-		differential_lapse(smart_gpu_buffer<float3>(temporary_memory)),
-		differential_shift_vector(smart_gpu_buffer<float3x3>(temporary_memory)),
-		differential_conformal_christoffel_trace(smart_gpu_buffer<float3x3>(temporary_memory)),
-		differential_traceless_conformal_extrinsic_curvature(smart_gpu_buffer<symmetric_3_tensor>(temporary_memory)),
-		differential_conformal_metric(smart_gpu_buffer<symmetric_3_tensor>(temporary_memory)),
-		christoffel(smart_gpu_buffer<christoffel_symbols>(temporary_memory)),
-		second_conformal_covariant_differential_lapse(smart_gpu_buffer<symmetric_float3x3>(temporary_memory)),
-		conformal_projected_ricci_tensor(smart_gpu_buffer<symmetric_float3x3>(temporary_memory)),
-		hamiltonian_constraint_violation(smart_gpu_buffer<float>(temporary_memory)),
-		momentum_constraint_violation(smart_gpu_buffer<float3>(temporary_memory)),
-		conformal_christoffel_trace_constraint_violation(smart_gpu_buffer<float3>(temporary_memory))
-	{ }
-	void swap_old_new() {
-		old_conformal_christoffel_trace.swap_pointers(new_conformal_christoffel_trace);
-		old_extrinsic_curvature__lapse__conformal_factor.swap_pointers(new_extrinsic_curvature__lapse__conformal_factor);
-		old_traceless_conformal_extrinsic_curvature.swap_pointers(new_traceless_conformal_extrinsic_curvature);
-		old_shift_vector.swap_pointers(new_shift_vector);
-		old_conformal_metric.swap_pointers(new_conformal_metric);
-	}
-	void destroy()
-	{
-		old_conformal_metric.destroy(); // cYij
-		old_traceless_conformal_extrinsic_curvature.destroy(); // cAij
-		old_extrinsic_curvature__lapse__conformal_factor.destroy(); // K; a; W 
-		old_conformal_christoffel_trace.destroy(); // cG^i
-		old_shift_vector.destroy(); // b^i
-
-		new_conformal_metric.destroy(); // cYij
-		new_traceless_conformal_extrinsic_curvature.destroy(); // cAij
-		new_extrinsic_curvature__lapse__conformal_factor.destroy(); // K; a; W 
-		new_conformal_christoffel_trace.destroy(); // cG^i
-		new_shift_vector.destroy(); // b^i
-
-		differential_conformal_factor.destroy(); // d_i W
-		differential_extrinsic_curvature.destroy(); // d_i K
-		differential_lapse.destroy(); // d_i a
-		differential_shift_vector.destroy(); // d_i b^j
-		differential_conformal_christoffel_trace.destroy(); // d_i cG^j
-		differential_traceless_conformal_extrinsic_curvature.destroy(); // cAij,k
-		differential_conformal_metric.destroy(); // cYij,k
-
-		christoffel.destroy(); // G^i_jk
-		second_conformal_covariant_differential_lapse.destroy(); // D_i D_j a
-		conformal_projected_ricci_tensor.destroy(); // cRij
-
-		hamiltonian_constraint_violation.destroy(); // H
-		momentum_constraint_violation.destroy(); // M^i
-		conformal_christoffel_trace_constraint_violation.destroy(); // G^i
-	}
-};
-
 // Constraint helper functions
 
-#define CONSTRAINT_DAMP_CHRISTOFFEL 1.f
+__device__ constexpr auto constraint_damp_christoffel = 1.f;
 inline __host__ __device__ float3 constraint_christoffel_damp_var(float3x3 shift_der, float extrinsic_curvature, float lapse, symmetric_float3x3 traceless_extrinsic_curvature)
 {
 	float temp_var = 2.f * (shift_der.trace() - 2.f * lapse * extrinsic_curvature) / 3.f;
-	return ((1.f + CONSTRAINT_DAMP_CHRISTOFFEL) * fmaxf(make_float3(temp_var) - shift_der.diag() - 2.f * traceless_extrinsic_curvature.diag * lapse / 5.f, make_float3(0.f))) + temp_var;
+	return ((1.f + constraint_damp_christoffel) * fmaxf(make_float3(temp_var) - shift_der.diag() - 2.f * traceless_extrinsic_curvature.diag * lapse / 5.f, make_float3(0.f))) + temp_var;
 }
 inline __host__ __device__ float hamiltonian_constraint_violation(symmetric_float3x3 conformal_ricci, symmetric_float3x3 inverse_metric, float extrinsic_curvature, symmetric_float3x3 traceless_extrinsic_curvature, float ADM_rho, float vacuum_energy)
 {
@@ -411,28 +300,24 @@ inline __host__ __device__ float bowen_york_conformal_psi(float3 relative_positi
 {
 	return 1.f + mass / max(1E-8f, 2.f * length(relative_position));
 }
-
 inline __host__ __device__ float bowen_york_criteria(float3 relative_position, float voxel_size, float mass)
 {
 	return mass * 2.f / max(0.0001f, dot(relative_position, relative_position) - voxel_size * voxel_size * .75f);
 }
-
 inline __host__ __device__ float donut_conformal_psi(float3 relative_position, float mass, float major_rad)
 {
-	float r = sqrt(relative_position.x * relative_position.x + relative_position.y * relative_position.y); float r2 = r - major_rad; r += major_rad;
-	r = arithmetic_geometric_mean(sqrt(r * r + relative_position.z * relative_position.z), sqrt(r2 * r2 + relative_position.z * relative_position.z));
-	return 1.f + mass / max(1E-8f, 2.f * r);
+	float r = sqrtf(relative_position.x * relative_position.x + relative_position.y * relative_position.y); float r2 = r - major_rad; r += major_rad;
+	r = arithmetic_geometric_mean(sqrtf(r * r + relative_position.z * relative_position.z), sqrtf(r2 * r2 + relative_position.z * relative_position.z));
+	return 1.f + mass / fmaxf(1E-8f, 2.f * r);
 }
-
 inline __host__ __device__ float donut_criteria(float3 relative_position, float voxel_size, float mass, float major_rad)
 {
-	float r = sqrt(relative_position.x * relative_position.x + relative_position.y * relative_position.y) - major_rad;
-	return mass / max(0.0001f, r * r + relative_position.z * relative_position.z - voxel_size * voxel_size * .75);
+	float r = sqrtf(relative_position.x * relative_position.x + relative_position.y * relative_position.y) - major_rad;
+	return mass / max(0.0001f, r * r + relative_position.z * relative_position.z - voxel_size * voxel_size * .75f);
 }
-
 inline __host__ __device__ float soft_criteria(float3 relative_position, float voxel_size, float mass, float soft_radius)
 {
-	return mass / max(0.0001f, dot(relative_position, relative_position) + soft_radius * soft_radius - voxel_size * voxel_size * .75);
+	return mass / max(0.0001f, dot(relative_position, relative_position) + soft_radius * soft_radius - voxel_size * voxel_size * .75f);
 }
 
 #endif

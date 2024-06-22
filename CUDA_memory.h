@@ -40,7 +40,7 @@ template <class T>
 struct smart_cpu_buffer
 {
     int temp_data;
-    const int dedicated_len;
+    int dedicated_len;
     T* cpu_buffer_ptr;
     bool created;
 
@@ -68,7 +68,7 @@ template <class T>
 struct smart_gpu_buffer
 {
     int temp_data;
-    const size_t dedicated_len;
+    size_t dedicated_len;
     T* gpu_buffer_ptr;
     bool created;
 
@@ -88,6 +88,10 @@ struct smart_gpu_buffer
         if (!created)
             throw std::exception("Buffer already freed or badly allocated.");
         return gpu_buffer_ptr;
+    }
+    smart_gpu_buffer() : dedicated_len(0), temp_data(0), created(false), gpu_buffer_ptr(nullptr)
+    {
+
     }
     smart_gpu_buffer(size_t max_size) : dedicated_len(max_size), temp_data(0)
     {
@@ -128,6 +132,10 @@ struct smart_gpu_cpu_buffer : smart_gpu_buffer<T>
         }
     }
 
+    smart_gpu_cpu_buffer() : smart_gpu_buffer<T>()
+    {
+
+    }
     smart_gpu_cpu_buffer(size_t max_size) : smart_gpu_buffer<T>(max_size)
     {
         if (created)
@@ -150,52 +158,6 @@ struct smart_gpu_cpu_buffer : smart_gpu_buffer<T>
             cudaFree(gpu_buffer_ptr);
             delete[] cpu_buffer_ptr;
         }
-        created = false;
-    }
-};
-
-template <class T, uint num_buff>
-struct gpu_cpu_multibuffer
-{
-    int temp_data;
-    const size_t dedicated_len;
-    T* gpu_buffer_ptr[num_buff];
-    T* cpu_buffer_ptr[num_buff];
-    bool created;
-
-    size_t total_size() const { return dedicated_len * sizeof(T) * num_buff; }
-
-    gpu_cpu_multibuffer(size_t max_size) : dedicated_len(max_size), temp_data(0)
-    {
-        created = true;
-        for (int i = 0; i < num_buff; i++)
-        {
-            gpu_buffer_ptr[i] = 0;
-            cpu_buffer_ptr[i] = new T[max_size];
-            if (cuda_alloc_buffer(&gpu_buffer_ptr[i], dedicated_len) != cudaSuccess)
-            {
-                destroy();
-                break;
-            }
-        }
-    }
-    cudaError_t copy_to_cpu(const uint idx)
-    {
-        return cuda_copyfromgpu_buffer<T>(cpu_buffer_ptr[idx], gpu_buffer_ptr[idx], dedicated_len);
-    }
-    cudaError_t copy_to_gpu(const uint idx)
-    {
-        return cuda_copytogpu_buffer<T>(cpu_buffer_ptr[idx], gpu_buffer_ptr[idx], dedicated_len);
-    }
-
-    virtual void destroy()
-    {
-        if (created)
-            for (int i = 0; i < num_buff; i++)
-            {
-                cudaFree(gpu_buffer_ptr[i]);
-                delete[] cpu_buffer_ptr[i];
-            }
         created = false;
     }
 };

@@ -51,6 +51,11 @@ void writeline(std::string str)
 {
 	printf((str + "\n").c_str());
 }
+template <class T>
+void writeline_t(T obj)
+{
+	printf((std::to_string(obj) + "\n").c_str());
+}
 
 #include <bitset>
 std::string to_bin(const int4 var)

@@ -4,6 +4,47 @@
 
 #include <chrono>
 
+// Example kernel for defragmentation
+__global__ void __example_AMR_restructure(const int* ids, const float* old_data, float* new_data, const uint num_nodes_final)
+{
+    uint new_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    if (new_idx >= num_nodes_final * total_tile_stride) { return; }
+    uint new_node_index = new_idx / total_tile_stride;
+    new_data[new_idx] = old_data[(new_idx % total_tile_stride) + ids[new_node_index] * total_tile_stride];
+}
+
+// Example Specialization for defragmentation
+template<>
+static void octree_allocator::copy_all_data<octree_duplex_hierarchical_buffer<float>>(const smart_gpu_cpu_buffer<int>& change_index, octree_duplex_hierarchical_buffer<float>& buff, const int depth, const int num_nodes_final)
+{
+    dim3 threads((buff.buff1[depth].dedicated_len < 1024) ? buff.buff1[depth].dedicated_len : 1024);
+    dim3 blocks(ceilf(buff.buff1[depth].dedicated_len / ((float)threads.x)));
+    __example_AMR_restructure<<<blocks, threads>>>(change_index.gpu_buffer_ptr, buff.old_buffers.cpu_buffer_ptr[depth], buff.new_buffers.cpu_buffer_ptr[depth], num_nodes_final);
+    cuda_sync(); buff.swap_buffers(depth);
+}
+
+long long one_second()
+{
+    std::chrono::steady_clock clock;
+    const long long now = clock.now().time_since_epoch().count();
+    _sleep(1000);
+    return clock.now().time_since_epoch().count() - now;
+}
+
+void test_tree()
+{
+    octree_allocator tree;
+    tree.add_node(tree.hierarchy[0][0], 0);
+    tree.add_node(tree.hierarchy[0][0], 4);
+    tree.add_node(tree.hierarchy[1][0], 7);                   
+    tree.add_node(tree.hierarchy[2][0], 7);                   
+    tree.add_node(tree.hierarchy[3][0], 7);                   
+    writeline(to_string(tree.hierarchy[0][0], tree));         
+                                                              
+    writeline(print_boundary_info(tree.hierarchy[1][0], make_int3(1, 0, 0), tree));
+    writeline(to_string(debug_target_uvs(make_uint3(21,1,1), tree.boundary_info(tree.hierarchy[1][0], make_int3(1, 0, 0)))));
+}
+
 int program()
 {
     cudaError_t cudaStatus = cudaSetDevice(0);
@@ -12,43 +53,8 @@ int program()
         return 1;
     }
 
-    octree tree = octree();
-    octree_node* ptrs[8];
-    for (int i = 0; i < 8; i++)
-        ptrs[i] = tree.add_child(tree.buffer[0], i);
-    for (int j = 0; j < 5; j++)
-        for (int i = 0; i < 8; i++)
-            ptrs[i] = tree.add_child(ptrs[i], i ^ 7);
-
-    boundary_handler handler = boundary_handler();
-    handler.generate_boundaries(tree, true);
-
-    for (int i = 0; i < tree.node_slots; i++)
-    {
-        octree_node* src = tree.buffer[i];
-        writeline("Node: " + to_string(tree.octree_position(src) / (1 << src->depth())));
-        writeline("Depth: " + std::to_string(src->depth()));
-        for (int j = 0; j < 6; j++)
-        {
-            domain_boundary_gpu bound = handler.boundary.cpu_buffer_ptr[i * 6 + j];
-            if (bound.target_index() == -1)
-            {
-                writeline("     target: (NaN, NaN, NaN)");
-                writeline("     depth: -1" );
-            }
-            else {
-                octree_node* tgt = tree.buffer[bound.target_index()];
-                writeline("     target: " + to_string(tree.octree_position(tgt) / (1 << src->depth())));
-                writeline("     depth: " + std::to_string(tgt->depth()));
-            }
-            writeline("         rel pos: " + to_string(bound.rel_pos));
-            writeline("         rel scale: " + std::to_string(bound.rel_scale()));
-            writeline("");
-        }
-        writeline("");
-    }
-
-    _sleep(100000);
+    test_tree();
+    _sleep(1000000);
 
     cudaStatus = cudaDeviceReset();
     if (cudaStatus != cudaSuccess) {

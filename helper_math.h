@@ -40,6 +40,7 @@
 #define HELPER_MATH_H
 
 #include "cuda_runtime.h"
+#include "device_launch_parameters.h"
 
 typedef unsigned int uint;
 typedef unsigned short ushort;
