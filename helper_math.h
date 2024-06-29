@@ -2175,6 +2175,21 @@ inline __host__ __device__ uint4 mod(uint4 a, uint4 b)
     return make_uint4(a.x % b.x, a.y % b.y, a.z % b.z, a.w % b.w);
 }
 
+inline __host__ __device__ uint2 mod(uint2 a, uint b)
+{
+    return make_uint2(a.x % b, a.y % b);
+}
+
+inline __host__ __device__ uint3 mod(uint3 a, uint b)
+{
+    return make_uint3(a.x % b, a.y % b, a.z % b);
+}
+
+inline __host__ __device__ uint4 mod(uint4 a, uint b)
+{
+    return make_uint4(a.x % b, a.y % b, a.z % b, a.w % b);
+}
+
 // M(a,b)
 inline __host__ __device__ float arithmetic_geometric_mean(float a, float b)
 {

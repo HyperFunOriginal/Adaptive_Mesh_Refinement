@@ -12,7 +12,11 @@
 __device__ constexpr uint error_depth = 69u;
 __device__ constexpr uint tile_resolution = 16u;
 __device__ constexpr uint tile_pad = 3u;
+
+__device__ constexpr float tile_uv_delta = 1.f / tile_resolution;
+__device__ constexpr uint half_tile_resolution = tile_resolution / 2u;
 __device__ constexpr uint total_tile_width = (tile_resolution + tile_pad * 2);
+__device__ constexpr uint tile_stride = tile_resolution * tile_resolution * tile_resolution;
 __device__ constexpr uint total_tile_stride = total_tile_width * total_tile_width * total_tile_width;
 
 constexpr uint max_tree_depth = 8;
@@ -81,7 +85,7 @@ static_assert(sizeof(OPS) == 4, "Incorrect size!");
 // Octree node
 struct node
 {
-	int children[8];
+	int* children; // reworked to use global buffers
 	OPS pos;
 
 	void clear_children()
@@ -89,15 +93,14 @@ struct node
 		for (int i = 0; i < 8; i++)
 			children[i] = -1;
 	}
-	node() : children(), pos(0, -1, 0, 0)
+	node() : children(nullptr), pos()
+	{
+	}
+	node(int parent, uint depth, uint subdiv, int* child_ptr) : children(child_ptr), pos(depth, parent, subdiv, 0)
 	{
 		clear_children();
 	}
-	node(int parent, uint depth, uint subdiv) : children(), pos(depth, parent, subdiv, 0)
-	{
-		clear_children();
-	}
-	node(const int _0) : children(), pos()
+	node(int* child_ptr) : children(child_ptr), pos(0, -1, 0, 0)
 	{
 		clear_children();
 	}
@@ -119,14 +122,181 @@ struct gpu_boundary
 	}
 };
 
+
+
+
+
+
+inline __host__ __device__ uint __index_full_raw(const uint3 idx)
+{
+	return idx.x + idx.y * total_tile_width + idx.z * total_tile_width * total_tile_width;
+}
+inline __host__ __device__ uint __index_int_raw(const uint3 idx)
+{
+	return __index_full_raw(idx + tile_pad);
+}
+// Inputs are unpadded positions, outputs in [0,1]³ if within main domain
+inline __host__ __device__ float3 __uvs(const uint3 idx)
+{
+	return (make_float3(idx) - tile_pad) / tile_resolution;
+}
+// Computes target uvs from current in-tile uvs
+inline __host__ __device__ float3 target_uvs(const uint3 idx, const gpu_boundary bdf)
+{
+	return (__uvs(idx) + make_float3(bdf.pos) * .5f - .5f) / (1 << bdf.read_depth()) + .5f;
+}
+
+// Octree-compatible evolution buffer, a.k.a. Octree Depth Hierarchy Bufffer
+template <class T>
+struct ODHB
+{
+	smart_gpu_cpu_buffer<T*> old_buffers;
+	smart_gpu_cpu_buffer<T*> new_buffers;
+
+	smart_gpu_buffer<T> buff1[max_tree_depth];
+	smart_gpu_buffer<T> buff2[max_tree_depth];
+
+	ODHB(const bool flush = true) : old_buffers(max_tree_depth), new_buffers(max_tree_depth)
+	{
+		for (int i = 0; i < max_tree_depth; i++)
+		{
+			buff1[i] = smart_gpu_buffer<T>(total_tile_stride * min(max_tiles_per_depth, 1 << min(30, 3 * i)));
+			buff2[i] = smart_gpu_buffer<T>(total_tile_stride * min(max_tiles_per_depth, 1 << min(30, 3 * i)));
+
+			old_buffers.cpu_buffer_ptr[i] = buff1[i].gpu_buffer_ptr;
+			new_buffers.cpu_buffer_ptr[i] = buff2[i].gpu_buffer_ptr;
+		}
+		if (flush)
+		{
+			old_buffers.copy_to_gpu();
+			new_buffers.copy_to_gpu();
+		}
+	}
+	void swap_buffers(const int depth)
+	{
+		T* temp = old_buffers.cpu_buffer_ptr[depth];
+		old_buffers.cpu_buffer_ptr[depth] = new_buffers.cpu_buffer_ptr[depth];
+		new_buffers.cpu_buffer_ptr[depth] = temp;
+
+		old_buffers.copy_to_gpu();
+		new_buffers.copy_to_gpu();
+	}
+	void destroy()
+	{
+		for (int i = 0; i < max_tree_depth; i++)
+		{
+			buff1[i].destroy();
+			buff2[i].destroy();
+		}
+		old_buffers.destroy();
+		new_buffers.destroy();
+	}
+};
+
+
+
+// Lerps within a tile. Assumes that uvs lies within 0 and 1 on each axis, and that start_index lies within the length of data
+template <class T>
+inline __host__ __device__ T __lerp_bilinear_data(const T* data, float3 uvs, const int start_index)
+{
+	uint start_idx = __index_full_raw(make_uint3((uvs * tile_resolution) + tile_pad)) + start_index; // can interpolate from ghost cells
+	uvs = fracf(uvs * tile_resolution);
+
+	T result = T();
+	result += data[start_idx] * (1.f - uvs.x) * (1.f - uvs.y) * (1.f - uvs.z);
+	result += data[start_idx + 1] * uvs.x * (1.f - uvs.y) * (1.f - uvs.z);
+	result += data[start_idx + total_tile_width] * (1.f - uvs.x) * uvs.y * (1.f - uvs.z);
+	result += data[start_idx + total_tile_width + 1] * uvs.x * uvs.y * (1.f - uvs.z);
+	result += data[start_idx + total_tile_width * total_tile_width] * (1.f - uvs.x) * (1.f - uvs.y) * uvs.z;
+	result += data[start_idx + total_tile_width * total_tile_width + 1] * uvs.x * (1.f - uvs.y) * uvs.z;
+	result += data[start_idx + total_tile_width * total_tile_width + total_tile_width] * (1.f - uvs.x) * uvs.y * uvs.z;
+	return result + data[start_idx + total_tile_width * total_tile_width + total_tile_width + 1] * uvs.x * uvs.y * uvs.z;
+}
+
+// Copies ghost voxel data for tiles from boundary tiles. gridsize = (tile res, tile res, tile pad * 6 * active_count)
+// We copy data from outer edge boundaries from ghost voxels of parent tiles.
+template <class T>
+__global__ void __copy_ghost_data(T* write, const T** read_old, const T** read_new, const gpu_boundary* curr, uint depth, const float lerp_val, const int active_count)
+{
+	uint3 idx = threadIdx + blockDim * blockIdx;
+	const uint node_idx = idx.z / (6 * tile_pad);
+	const uint border_idx = (idx.z / tile_pad) % 6u;
+	idx.z %= tile_pad; idx.x += tile_pad; idx.y += tile_pad;
+
+	if (node_idx >= active_count)
+		return;
+
+	if (border_idx >= 3)
+		idx.z = total_tile_width - idx.z - 1;
+	if (border_idx == 0 || border_idx == 3)
+		idx = make_uint3(idx.z, idx.x, idx.y);
+	else if (border_idx == 1 || border_idx == 4)
+		idx = make_uint3(idx.x, idx.z, idx.y);
+
+	const uint depth_bdf = curr[node_idx * 6 + border_idx].read_depth();
+	if (depth_bdf == error_depth)
+		return;
+
+	T old_data = __lerp_bilinear_data<T>(read_old[depth - depth_bdf], target_uvs(idx, curr[node_idx * 6 + border_idx]), curr[node_idx * 6 + border_idx].read_index() * total_tile_stride);
+	T new_data = __lerp_bilinear_data<T>(read_new[depth - depth_bdf], target_uvs(idx, curr[node_idx * 6 + border_idx]), curr[node_idx * 6 + border_idx].read_index() * total_tile_stride);
+	write[__index_full_raw(idx) + node_idx * total_tile_stride] = (old_data * (1.f - lerp_val)) + (new_data * lerp_val);
+}
+
+// Copies from children tiles data at the end of a timestep. gridsize = (tile res, tile res, tile res * active_count)
+template <class T>
+__global__ void __copy_downsample(T* __restrict__ write, const T* __restrict__ read, const int* children_buff, const int active_count)
+{
+	uint3 idx = threadIdx + blockDim * blockIdx;
+	const uint node_idx = idx.z / tile_stride;
+	idx.z -= node_idx * tile_resolution;
+
+	if (node_idx >= active_count)
+		return;
+
+	const float3 uvs = make_float3(mod(idx, half_tile_resolution)) / half_tile_resolution + tile_uv_delta;
+	const uint subdivision = (idx.x >= half_tile_resolution) * 4 + (idx.y >= half_tile_resolution) * 2 + (idx.z >= half_tile_resolution);
+	const int child = children_buff[subdivision + node_idx * 8];
+
+	if (child == -1)
+		return;
+	write[__index_int_raw(idx) + node_idx * total_tile_stride] = __lerp_bilinear_data<T>(read, uvs, child * total_tile_stride);
+}
+
+// Copies from parent tile data at initialization. gridsize = (tile res, tile res, tile res)
+template <class T>
+__global__ void __copy_upscale(T* __restrict__ write, const T* __restrict__ read, const int parent_idx, const int node_idx, const float3 offset)
+{
+	uint3 idx = threadIdx + blockDim * blockIdx;
+	if (idx.x >= tile_resolution || idx.y >= tile_resolution || idx.z >= tile_resolution)
+		return;
+
+	float3 uvs = make_float3(idx) * .5f / tile_resolution;
+	write[__index_int_raw(idx)] = __lerp_bilinear_data<T>(read, uvs + offset, parent_idx * total_tile_stride);
+}
+
+// Copies into new buffer upon restructure/defrag. gridsize = (num_nodes_final * total_tile_stride, 1, 1)
+template <class T>
+__global__ void __copy_restructure(const int* ids, const T* __restrict__ old_data, T* __restrict__ new_data, const uint num_nodes_final)
+{
+	uint new_idx = threadIdx.x + blockDim.x * blockIdx.x;
+	if (new_idx >= num_nodes_final * total_tile_stride) { return; }
+	uint new_node_index = new_idx / total_tile_stride;
+	new_data[new_idx] = old_data[(new_idx % total_tile_stride) + ids[new_node_index] * total_tile_stride];
+}
+
+
+
+
 // Octree
+template<class T>
 struct octree_allocator
 {
-	std::deque<OPS> fresh;
+	T& associated_data;
 	std::list<OPS> invalidated;
 	std::vector<node> hierarchy[max_tree_depth];
 
 	smart_gpu_cpu_buffer<gpu_boundary> boundaries[max_tree_depth];
+	smart_gpu_cpu_buffer<int> children[max_tree_depth];
 	int hierarchy_restructuring;
 
 private:
@@ -144,7 +314,7 @@ private:
 	}
 
 public:
-	octree_allocator() : fresh(), invalidated(), hierarchy(), hierarchy_restructuring(-1), boundaries()
+	octree_allocator(T& dat) : associated_data(dat), invalidated(), hierarchy(), hierarchy_restructuring(-1), boundaries(), children()
 	{
 		int test = -1;
 		assert(test >> 1 == -1);
@@ -152,9 +322,15 @@ public:
 		{
 			boundaries[i] = smart_gpu_cpu_buffer<gpu_boundary>(min(max_tiles_per_depth, 1 << min(30, 3 * i)) * 6);
 			hierarchy[i].reserve(min(max_tiles_per_depth, 1 << min(30, 3 * i)));
+			children[i] = smart_gpu_cpu_buffer<int>(min(max_tiles_per_depth, 1 << min(30, 3 * i)) * 8);
 		}
-		hierarchy[0].push_back(node());
+		hierarchy[0].push_back(node(children[0].cpu_buffer_ptr));
 	}
+
+	void copy_all_data(const smart_gpu_cpu_buffer<int>& change_index, T& data, const int depth, const int num_nodes_final);
+	void init_data(T& data, const int parent_idx, const int node_idx, const float3 offset, const int node_depth);
+
+
 
 	// Checks if a depth is marked out but still has room due to invalidated slots.
 	void check_for_restructure(const int depth_to_check)
@@ -169,14 +345,8 @@ public:
 				return;
 			}
 	}
-	
-	// Add whatever arguments needed
-	template<class T>
-	void copy_all_data(const smart_gpu_cpu_buffer<int>& change_index, T& data, const int depth, const int num_nodes_final);
-	
 	// Get all nodes of a full depth to "move houses" to make room for new nodes. Deletes all invalidated nodes of the specified depth. Defragmentation
-	template<class T>
-	void restructure_data(T& data)
+	void restructure_data()
 	{
 		if (hierarchy_restructuring == -1)
 			return;
@@ -204,11 +374,14 @@ public:
 		}
 
 		index_change.copy_to_gpu();
-		copy_all_data(index_change, data, hierarchy_restructuring, temp.size());
+		copy_all_data(index_change, associated_data, hierarchy_restructuring, temp.size());
 		hierarchy[hierarchy_restructuring] = temp;
 		hierarchy_restructuring = -1;
 		index_change.destroy();
 	}
+
+
+
 
 	// Adds a node to the octree - first checks if there is a free slot from an invalidated ndoe
 	node* add_node(node& parent, const uint subdivision)
@@ -232,21 +405,21 @@ public:
 				ptr->pos = data;
 				ptr->clear_children();
 
-				fresh.push_back(data);
 				invalidated.erase(i);
 				parent.children[subdivision] = data.read_index();
+				init_data(associated_data, parent.pos.read_index(), ptr->pos.read_index(), make_float3(ptr->pos.read_subdivision_uint3()) * .5f, new_depth);
 
 				return ptr;
 			}
 		}
 
-		hierarchy[new_depth].push_back(node(index, new_depth, subdivision));
 		const size_t size = hierarchy[new_depth].size();
+		hierarchy[new_depth].push_back(node(index, new_depth, subdivision, children[new_depth].cpu_buffer_ptr + size * 8));
 
-		hierarchy[new_depth][size - 1].pos.write_index(size - 1);
-		fresh.push_back(hierarchy[new_depth][size - 1].pos);
-		parent.children[subdivision] = size - 1;
-		return &hierarchy[new_depth][size - 1];
+		hierarchy[new_depth][size].pos.write_index(size);
+		parent.children[subdivision] = size;
+		init_data(associated_data, parent.pos.read_index(), size, make_float3(hierarchy[new_depth][size].pos.read_subdivision_uint3()) * .5f, new_depth);
+		return &hierarchy[new_depth][size];
 	}
 	// Removes a node from the octree by marking it as invalidated
 	bool remove_node(node& node)
@@ -259,21 +432,31 @@ public:
 				remove_node(hierarchy[depth + 1][node.children[i]]);
 
 		invalidated.push_back(node.pos);
-		hierarchy[depth - 1][node.pos.read_parent_index()].children[node.pos.read_subdivision()] = -1;
+		hierarchy[depth - 1][node.pos.read_parent_index()].children[node.pos.read_subdivision()] = -1; // effective autoclear children
 		node.pos = OPS(error_depth, -1, 0, -1);
 		return true;
 	}
 
-	// Finds immediate neighbour/sibling in a certain direction, with units of multiples of node width
-	const node* find_neighbour(const node& n, const int3 dir) const {
+
+	// Finds immediate neighbour/sibling in a certain direction, with units of multiples of node width. We clamp for ghost voxel boundaries.
+	const node* find_neighbour(const node& n, const int3 dir, const bool clamp_v = true) const {
 		if (n.pos.read_depth() == error_depth)
 			return nullptr;
 
 		int3 final_pos = compute_absolute_position_offset(n) + dir;
+		int lower_limit = 0;
 		if (final_pos >> n.pos.read_depth() != int3())
-			return nullptr;
+		{
+			if (clamp_v)
+			{
+				final_pos = clamp(final_pos, int3(), make_int3((1 << n.pos.read_depth()) - 1));
+				lower_limit = 1;
+			}
+			else 
+				return nullptr;
+		}
 		const node* temp_ptr = &hierarchy[0][0]; // root
-		for (int i = n.pos.read_depth() - 1, k = 1; i >= 0; i--, k++)
+		for (int i = n.pos.read_depth() - 1, k = 1; i >= lower_limit; i--, k++)
 		{
 			uint subdiv = (((final_pos.x >> i) & 1) << 2)
 						| (((final_pos.y >> i) & 1) << 1)
@@ -292,7 +475,7 @@ public:
 		if (ptr == nullptr)
 			return gpu_boundary();
 		int depth_change = n.pos.read_depth() - ptr->pos.read_depth();
-		int3 abs_pos = absolute_position_offset_signed(*ptr) * (1 << depth_change) - absolute_position_offset_signed(n);
+		int3 abs_pos = absolute_position_offset_signed(n) - absolute_position_offset_signed(*ptr) * (1 << depth_change);
 		return gpu_boundary(ptr->pos.read_index(), depth_change, abs_pos);
 	}
 	// Generates all boundary information of a certain depth and copies it to the GPU
@@ -312,7 +495,8 @@ static std::string tab_spacing(const int number)
 		result += "	";
 	return result;
 }
-static std::string to_string(const node& root, const octree_allocator& tree, const int print_depth = 0)
+template<class T>
+static std::string to_string(const node& root, const octree_allocator<T>& tree, const int print_depth = 0)
 {
 	const int depth = root.pos.read_depth();
 	std::string temp = tab_spacing(print_depth);
@@ -328,7 +512,8 @@ static std::string to_string(const node& root, const octree_allocator& tree, con
 			temp += to_string(tree.hierarchy[depth + 1][root.children[i]], tree, print_depth + 1);
 	return temp;
 }
-static std::string print_boundary_info(const node& n, const int3 dir, const octree_allocator& tree)
+template<class T>
+static std::string print_boundary_info(const node& n, const int3 dir, const octree_allocator<T>& tree)
 {
 	std::string temp = "Node with depth " + std::to_string(n.pos.read_depth()) + " and index " + std::to_string(n.pos.read_index()) + " has boundary along " + to_string(dir) + " to the following:\n";
 	gpu_boundary bdf = tree.boundary_info(n, dir);
@@ -339,105 +524,5 @@ static std::string print_boundary_info(const node& n, const int3 dir, const octr
 	temp += "\nScaled Offset: " + to_string(make_float3(bdf.pos) / (1 << bdf.read_depth()));
 	return temp;
 }
-
-inline __host__ __device__ uint __index_full_raw(const uint3 idx)
-{
-	return idx.x + idx.y * total_tile_width + idx.z * total_tile_width * total_tile_width;
-}
-inline __host__ __device__ uint __index_int_raw(const uint3 idx)
-{
-	return __index_full_raw(idx + tile_pad);
-}
-// Inputs are unpadded positions, outputs in [0,1]³ if within main domain
-inline __host__ __device__ float3 __uvs(const uint3 idx)
-{
-	return make_float3(idx - tile_pad) / tile_resolution;
-}
-
-inline __host__ float3 debug_target_uvs(const uint3 idx, const gpu_boundary bdf)
-{
-	return (__uvs(idx) + make_float3(bdf.pos)) / (1 << bdf.read_depth());
-}
-
-// Octree-compatible evolution buffer
-template <class T>
-struct octree_duplex_hierarchical_buffer
-{
-	smart_gpu_cpu_buffer<T*> old_buffers;
-	smart_gpu_cpu_buffer<T*> new_buffers;
-
-	smart_gpu_buffer<T> buff1[max_tree_depth];
-	smart_gpu_buffer<T> buff2[max_tree_depth];
-
-	octree_duplex_hierarchical_buffer(const bool flush = true) : old_buffers(max_tree_depth), new_buffers(max_tree_depth)
-	{
-		for (int i = 0; i < max_tree_depth; i++)
-		{
-			buff1[i] = smart_gpu_buffer<T>(total_tile_stride * min(max_tiles_per_depth, 1 << min(30, 3 * i)));
-			buff2[i] = smart_gpu_buffer<T>(total_tile_stride * min(max_tiles_per_depth, 1 << min(30, 3 * i)));
-
-			old_buffers.cpu_buffer_ptr[i] = buff1[i].gpu_buffer_ptr;
-			new_buffers.cpu_buffer_ptr[i] = buff2[i].gpu_buffer_ptr;
-		}
-		if (flush)
-		{
-			old_buffers.copy_to_gpu();
-			new_buffers.copy_to_gpu();
-		}
-	}
-	void swap_buffers(const int depth)
-	{
-		T* temp = old_buffers.cpu_buffer_ptr[depth];
-		old_buffers.cpu_buffer_ptr[depth] = new_buffers.cpu_buffer_ptr[depth];
-		new_buffers.cpu_buffer_ptr[depth] = temp;
-
-		old_buffers.copy_to_gpu();
-		new_buffers.copy_to_gpu();
-	}
-};
-
-// Lerps within a tile. Assumes that uvs lies within 0 and 1 on each axis, and that start_index lies within the length of data
-template <class T>
-inline __host__ __device__ T __lerp_bilinear_data(const T* data, float3 uvs, const int start_index)
-{
-	uint start_idx = __index_full_raw(make_uint3(uvs * tile_resolution) + tile_pad) + start_index;
-	uvs = fracf(uvs * tile_resolution);
-
-	T result = T();
-	result += data[start_idx]																			* (1.f - uvs.x) * (1.f - uvs.y) * (1.f - uvs.z);
-	result += data[start_idx + 1]																		* uvs.x			* (1.f - uvs.y) * (1.f - uvs.z);
-	result += data[start_idx + total_tile_width]														* (1.f - uvs.x) * uvs.y			* (1.f - uvs.z);
-	result += data[start_idx + total_tile_width + 1]													* uvs.x			* uvs.y			* (1.f - uvs.z);
-	result += data[start_idx + total_tile_width * total_tile_width]										* (1.f - uvs.x) * (1.f - uvs.y) * uvs.z;
-	result += data[start_idx + total_tile_width * total_tile_width + 1]									* uvs.x			* (1.f - uvs.y) * uvs.z;
-	result += data[start_idx + total_tile_width * total_tile_width + total_tile_width]					* (1.f - uvs.x) * uvs.y			* uvs.z;
-	return result + data[start_idx + total_tile_width * total_tile_width + total_tile_width + 1]		* uvs.x			* uvs.y			* uvs.z;
-}
-
-template <class T>
-__global__ void __copy_ghost_data(T** write, const T** read, const gpu_boundary* curr, int depth)
-{
-	uint3 idx = threadIdx + blockDim * blockIdx;
-	const uint node_idx = idx.z / (6 * tile_pad);
-	const uint border_idx = (idx.z / tile_pad) % 6u;
-	idx.z %= tile_pad;
-
-	if (border_idx >= 3)
-		idx.z = total_tile_width - idx.z - 1;
-	if (border_idx == 0 || border_idx == 3)
-		idx = make_uint3(idx.z, idx.x, idx.y);
-	else if (border_idx == 1 || border_idx == 4)
-		idx = make_uint3(idx.x, idx.z, idx.y);
-
-	const uint depth_bdf = curr[node_idx * 6 + border_idx].read_depth();
-	if (depth_bdf == error_depth)
-		return;
-
-	float3 target_uvs = (__uvs(idx) + make_float3(curr[node_idx * 6 + border_idx].pos)) / (1 << depth_bdf);
-	write[depth][__index_full_raw(idx) + node_idx * total_tile_stride] = __lerp_bilinear_data<T>(read[depth - depth_bdf], target_uvs, curr[node_idx * 6 + border_idx].read_index() * total_tile_stride);
-}
-
-
-// Todo: Copying, Coarsening, Refinement
 
 #endif
