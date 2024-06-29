@@ -6,7 +6,6 @@
 #include "helper_math.h"
 #include <cassert>
 #include <vector>
-#include <deque>
 #include <list>
 
 __device__ constexpr uint error_depth = 69u;
@@ -325,8 +324,10 @@ public:
 			children[i] = smart_gpu_cpu_buffer<int>(min(max_tiles_per_depth, 1 << min(30, 3 * i)) * 8);
 		}
 		hierarchy[0].push_back(node(children[0].cpu_buffer_ptr));
+		init_root(associated_data);
 	}
 
+	void init_root(T& data);
 	void copy_all_data(const smart_gpu_cpu_buffer<int>& change_index, T& data, const int depth, const int num_nodes_final);
 	void init_data(T& data, const int parent_idx, const int node_idx, const float3 offset, const int node_depth);
 

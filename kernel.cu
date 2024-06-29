@@ -5,6 +5,16 @@
 #include <chrono>
 
 
+__global__ void __init_root_data(float* root_buff)
+{
+    uint3 idx = threadIdx + blockDim * blockIdx;
+    if (idx.x >= total_tile_width || idx.y >= total_tile_width || idx.z >= total_tile_width)
+        return;
+    root_buff[__index_full_raw(idx)] = 0.f;
+}
+
+
+
 // Example Specialization for defragmentation
 template<>
 static void octree_allocator<ODHB<float>>::copy_all_data(const smart_gpu_cpu_buffer<int>& change_index, ODHB<float>& buff, const int depth, const int num_nodes_final)
@@ -22,6 +32,16 @@ static void octree_allocator<ODHB<float>>::init_data(ODHB<float>& data, const in
     dim3 threads(min(tile_resolution, 8), min(tile_resolution, 8), min(tile_resolution, 8));
     dim3 blocks(ceilf(tile_resolution / ((float)threads.x)), ceilf(tile_resolution / ((float)threads.x)), ceilf(tile_resolution / ((float)threads.x)));
     __copy_upscale<float><<<blocks, threads>>>(data.buff1[node_depth], data.buff1[node_depth - 1], parent_idx, node_idx, offset);
+}
+
+// Example Specialization for root initialization
+template<>
+static void octree_allocator<ODHB<float>>::init_root(ODHB<float>& data)
+{
+    dim3 threads(min(total_tile_width, 8), min(total_tile_width, 8), min(total_tile_width, 8));
+    dim3 blocks(ceilf(total_tile_width / ((float)threads.x)), ceilf(total_tile_width / ((float)threads.x)), ceilf(total_tile_width / ((float)threads.x)));
+    __init_root_data<<<blocks, threads>>>(data.buff1[0].gpu_buffer_ptr);
+    cuda_sync();
 }
 
 
@@ -43,7 +63,7 @@ void tree_test()
     tree.add_node(tree.hierarchy[3][0], 7);                   
     writeline(to_string(tree.hierarchy[0][0], tree));         
                                                               
-    writeline(print_boundary_info(tree.hierarchy[4][0], make_int3(1, 0, 0), tree));
+    writeline(print_boundary_info(tree.hierarchy[4][0], make_int3(1, 0, 0), tree)); // notice that we clamp boundaries such that outer edges copy from parent ghost cells.
     float3 uvs_temp = target_uvs(make_uint3(19, 11, 11), tree.boundary_info(tree.hierarchy[4][0], make_int3(1, 0, 0))) * tile_resolution + tile_pad;
     writeline(to_string(make_uint3(uvs_temp)));
 }
