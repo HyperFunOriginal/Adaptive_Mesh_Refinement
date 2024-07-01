@@ -349,10 +349,13 @@ struct octree_allocator
 	std::list<OPS> invalidated;
 	std::vector<node> hierarchy[max_tree_depth];
 
-	smart_gpu_cpu_buffer<gpu_boundary> boundaries[max_tree_depth];
-	smart_gpu_cpu_buffer<int> children[max_tree_depth];
+	smart_gpu_cpu_buffer<gpu_boundary> boundaries[max_tree_depth]; // must generate and copy according to boundary_dirty_state
+	smart_gpu_cpu_buffer<int> children[max_tree_depth]; // must copy according to children_dirty_state
+	smart_gpu_buffer<int*> children_hierarchy; // GPU array-of-arrays
 	int hierarchy_restructuring;
+
 	ODDF boundary_dirty_state;
+	ODDF children_dirty_state;
 
 private:
 	int3 compute_absolute_position_offset(const node& node) const
@@ -369,24 +372,27 @@ private:
 	}
 
 public:
-	octree_allocator(T& dat) : associated_data(dat), invalidated(), hierarchy(), hierarchy_restructuring(-1), boundary_dirty_state(), boundaries(), children()
+	octree_allocator(T& dat) : associated_data(dat), invalidated(), hierarchy(), hierarchy_restructuring(-1), boundary_dirty_state(), children_dirty_state(), boundaries(), children(), children_hierarchy(max_tree_depth)
 	{
 		int test = -1;
 		assert(test >> 1 == -1);
+
+		int* temp[max_tree_depth];
 		for (int i = 0; i < max_tree_depth; i++)
 		{
 			boundaries[i] = smart_gpu_cpu_buffer<gpu_boundary>(min(max_tiles_per_depth, 1 << min(30, 3 * i)) * 6);
-			hierarchy[i].reserve(min(max_tiles_per_depth, 1 << min(30, 3 * i)));
 			children[i] = smart_gpu_cpu_buffer<int>(min(max_tiles_per_depth, 1 << min(30, 3 * i)) * 8);
+			hierarchy[i].reserve(min(max_tiles_per_depth, 1 << min(30, 3 * i)));
+			temp[i] = children[i].gpu_buffer_ptr;
 		}
-		hierarchy[0].push_back(node(children[0].cpu_buffer_ptr));
-		init_root(associated_data);
+		hierarchy[0].push_back(node(children[0].cpu_buffer_ptr)); // Root
+		cuda_copytogpu_buffer(temp, children_hierarchy.gpu_buffer_ptr, max_tree_depth);
+		init_root(associated_data); cuda_sync();
 	}
 
 	void init_root(T& data);
 	void copy_all_data(const smart_gpu_cpu_buffer<int>& change_index, T& data, const int depth, const int num_nodes_final);
 	void init_data(T& data, const int parent_idx, const int node_idx, const float3 offset, const int node_depth);
-
 
 
 	// Checks if a depth is marked out but still has room due to invalidated slots.
@@ -433,10 +439,14 @@ public:
 		index_change.copy_to_gpu();
 		copy_all_data(index_change, associated_data, hierarchy_restructuring, temp.size());
 		hierarchy[hierarchy_restructuring] = temp;
+
+		children_dirty_state.set_dirty_depth(true, hierarchy_restructuring);
+		children_dirty_state.set_dirty_depth(true, hierarchy_restructuring-1);
+		boundary_dirty_state.data |= 4294967295u << hierarchy_restructuring;
+
 		hierarchy_restructuring = -1;
 		index_change.destroy();
 	}
-
 
 
 private:
@@ -486,6 +496,8 @@ public:
 		if (!symbolic)
 			init_data(associated_data, parent.pos.read_index(), ptr->pos.read_index(), make_float3(ptr->pos.read_subdivision_uint3()) * .5f, curr_depth);
 		boundary_dirty_state.data |= 4294967295u << curr_depth;
+		children_dirty_state.set_dirty_depth(true, curr_depth - 1);
+		children_dirty_state.set_dirty_depth(true, curr_depth); // Play it safe
 		return ptr;
 	}
 
@@ -502,10 +514,10 @@ public:
 		invalidated.push_back(node.pos);
 		hierarchy[depth - 1][node.pos.read_parent_index()].children[node.pos.read_subdivision()] = -1; // effective autoclear children
 		boundary_dirty_state.data |= 4294967295u << depth;
+		children_dirty_state.set_dirty_depth(true, depth - 1); // No children = no problem, for lowest child.
 		node.pos = OPS(error_depth, -1, 0, -1);
 		return true;
 	}
-
 
 
 	// Finds immediate neighbour/sibling in a certain direction, with units of multiples of node width. We clamp for ghost voxel boundaries.
@@ -557,6 +569,12 @@ public:
 		boundary_dirty_state.set_dirty_depth(false, depth);
 		return boundaries[depth].copy_to_gpu();
 	}
+	// Copies changes to children to GPU.
+	cudaError_t copy_children_data(const int depth)
+	{
+		children_dirty_state.set_dirty_depth(false, depth);
+		return children[depth].copy_to_gpu();
+	}
 };
 
 static std::string tab_spacing(const int number)
@@ -596,5 +614,6 @@ static std::string print_boundary_info(const node& n, const int3 dir, const octr
 	return temp;
 }
 
+// To note: Check if dirty: Before using __copy_ghost_data, call generate_boundaries. Before using children or children_hierarchy or __copy_downscale, call copy_children_data.
 
 #endif
