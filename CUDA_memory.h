@@ -101,7 +101,6 @@ struct smart_gpu_buffer
         else
             created = true;
     }
-
     virtual void destroy()
     {
         if (created)

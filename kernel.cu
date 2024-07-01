@@ -1,6 +1,6 @@
 ﻿#include "printstring_helper.h"
 #include "bssn_kernels.cu"
-#include "io_img_helper.h"
+#include "amr_debug.h"
 
 #include <chrono>
 
@@ -10,9 +10,8 @@ __global__ void __init_root_data(float* root_buff)
     uint3 idx = threadIdx + blockDim * blockIdx;
     if (idx.x >= total_tile_width || idx.y >= total_tile_width || idx.z >= total_tile_width)
         return;
-    root_buff[__index_full_raw(idx)] = 0.f;
+    root_buff[__index_full_raw(idx)] = 1.f / (1.f + 0.5f / length(__uvs(idx) - .5f));
 }
-
 
 
 // Example Specialization for defragmentation
@@ -30,7 +29,7 @@ template<>
 static void octree_allocator<ODHB<float>>::init_data(ODHB<float>& data, const int parent_idx, const int node_idx, const float3 offset, const int node_depth)
 {
     dim3 threads(min(tile_resolution, 8), min(tile_resolution, 8), min(tile_resolution, 8));
-    dim3 blocks(ceilf(tile_resolution / ((float)threads.x)), ceilf(tile_resolution / ((float)threads.x)), ceilf(tile_resolution / ((float)threads.x)));
+    dim3 blocks(ceilf(tile_resolution / ((float)threads.x)), ceilf(tile_resolution / ((float)threads.y)), ceilf(tile_resolution / ((float)threads.z)));
     __copy_upscale<float><<<blocks, threads>>>(data.buff1[node_depth], data.buff1[node_depth - 1], parent_idx, node_idx, offset);
 }
 
@@ -39,11 +38,10 @@ template<>
 static void octree_allocator<ODHB<float>>::init_root(ODHB<float>& data)
 {
     dim3 threads(min(total_tile_width, 8), min(total_tile_width, 8), min(total_tile_width, 8));
-    dim3 blocks(ceilf(total_tile_width / ((float)threads.x)), ceilf(total_tile_width / ((float)threads.x)), ceilf(total_tile_width / ((float)threads.x)));
+    dim3 blocks(ceilf(total_tile_width / ((float)threads.x)), ceilf(total_tile_width / ((float)threads.y)), ceilf(total_tile_width / ((float)threads.z)));
     __init_root_data<<<blocks, threads>>>(data.buff1[0].gpu_buffer_ptr);
     cuda_sync();
 }
-
 
 long long one_second()
 {
@@ -57,15 +55,19 @@ void tree_test()
     ODHB<float> temp(true);
 
     octree_allocator<ODHB<float>> tree(temp);
-    tree.add_node(tree.hierarchy[0][0], 7);
-    tree.add_node(tree.hierarchy[1][0], 7);                   
-    tree.add_node(tree.hierarchy[2][0], 7);                   
-    tree.add_node(tree.hierarchy[3][0], 7);                   
-    writeline(to_string(tree.hierarchy[0][0], tree));         
-                                                              
-    writeline(print_boundary_info(tree.hierarchy[4][0], make_int3(1, 0, 0), tree)); // notice that we clamp boundaries such that outer edges copy from parent ghost cells.
-    float3 uvs_temp = target_uvs(make_uint3(19, 11, 11), tree.boundary_info(tree.hierarchy[4][0], make_int3(1, 0, 0))) * tile_resolution + tile_pad;
-    writeline(to_string(make_uint3(uvs_temp)));
+    tree.add_node(tree.hierarchy[0][0], 0);
+    tree.add_node(tree.hierarchy[1][0], 7);
+    writeline(to_string(tree.hierarchy[0][0], tree));
+
+    copy_ghosts_debug(tree, 1);
+    copy_ghosts_debug(tree, 2);
+
+    if (create_folder("Folder"))
+    {
+        debug_node<float>(tree, 0, 0, 10, "Folder/d0.png");
+        debug_node<float>(tree, 1, 0, 18, "Folder/d1.png");
+        debug_node<float>(tree, 2, 0, 18, "Folder/d2.png");
+    }
 }
 
 static std::string vert_bars(const int number)

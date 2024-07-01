@@ -134,15 +134,38 @@ inline __host__ __device__ uint __index_int_raw(const uint3 idx)
 {
 	return __index_full_raw(idx + tile_pad);
 }
+// Ghost cells only available from certain directions. Clamping necessary
+inline __host__ __device__ uint __index_partial(uint3 idx)
+{
+	int dx = max((int)tile_pad - (int)idx.x, (int)idx.x - (int)(tile_resolution + tile_pad - 1));
+	int dy = max((int)tile_pad - (int)idx.y, (int)idx.y - (int)(tile_resolution + tile_pad - 1));
+	int dz = max((int)tile_pad - (int)idx.z, (int)idx.z - (int)(tile_resolution + tile_pad - 1));
+	if (dx >= dy && dx >= dz)
+	{
+		idx.y = clamp(idx.y, tile_pad, tile_resolution + tile_pad - 1);
+		idx.z = clamp(idx.z, tile_pad, tile_resolution + tile_pad - 1);
+	}
+	else if (dy >= dx && dy >= dz)
+	{
+		idx.x = clamp(idx.x, tile_pad, tile_resolution + tile_pad - 1);
+		idx.z = clamp(idx.z, tile_pad, tile_resolution + tile_pad - 1);
+	}
+	else if (dz >= dy && dz >= dx)
+	{
+		idx.x = clamp(idx.x, tile_pad, tile_resolution + tile_pad - 1);
+		idx.y = clamp(idx.y, tile_pad, tile_resolution + tile_pad - 1);
+	}
+	return __index_full_raw(idx);
+}
 // Inputs are unpadded positions, outputs in [0,1]³ if within main domain
 inline __host__ __device__ float3 __uvs(const uint3 idx)
 {
 	return (make_float3(idx) - tile_pad) / tile_resolution;
 }
 // Computes target uvs from current in-tile uvs
-inline __host__ __device__ float3 target_uvs(const uint3 idx, const gpu_boundary bdf)
+inline __host__ __device__ float3 target_uvs(const uint3& idx, const gpu_boundary& bdf)
 {
-	return (__uvs(idx) + make_float3(bdf.pos) * .5f - .5f) / (1 << bdf.read_depth()) + .5f;
+	return ((__uvs(idx) + make_float3(bdf.pos) * .5f - .5f) / (1u << bdf.read_depth())) + .5f;
 }
 
 // Octree-compatible evolution buffer, a.k.a. Octree Depth Hierarchy Bufffer
@@ -193,57 +216,76 @@ struct ODHB
 };
 
 
+// Lerps within a tile. Assumes that uvs lies within 0 and 1 on each axis, and that start_index lies within the length of data. Clamps uvs between 0 and 1
+template <class T>
+inline __host__ __device__ T __lerp_bilinear_data_clamp(const T* data, float3 uvs, int start_index)
+{
+	uvs = (uvs * tile_resolution) + tile_pad;
+	uint3 root_idx = make_uint3(clamp(uvs, tile_pad, tile_pad + tile_resolution - 2)); // can interpolate from ghost cells
+	uvs -= make_float3(root_idx); start_index += __index_full_raw(root_idx);
 
-// Lerps within a tile. Assumes that uvs lies within 0 and 1 on each axis, and that start_index lies within the length of data
+		T result  = data[start_index															 ] * (1.f - uvs.x)	* (1.f - uvs.y) * (1.f - uvs.z);
+		  result += data[start_index + 1														 ] * uvs.x			* (1.f - uvs.y) * (1.f - uvs.z);
+		  result += data[start_index + total_tile_width											 ] * (1.f - uvs.x)	* uvs.y			* (1.f - uvs.z);
+		  result += data[start_index + total_tile_width + 1										 ] * uvs.x			* uvs.y			* (1.f - uvs.z);
+		  result += data[start_index + total_tile_width * total_tile_width						 ] * (1.f - uvs.x)	* (1.f - uvs.y) * uvs.z;
+		  result += data[start_index + total_tile_width * total_tile_width + 1					 ] * uvs.x			* (1.f - uvs.y) * uvs.z;
+		  result += data[start_index + total_tile_width * total_tile_width + total_tile_width	 ] * (1.f - uvs.x)	* uvs.y			* uvs.z;
+	return result + data[start_index + total_tile_width * total_tile_width + total_tile_width + 1] * uvs.x			* uvs.y			* uvs.z;
+}
+
+// Lerps within a tile. Assumes that uvs lies within 0 and 1 on each axis, and that start_index lies within the length of data. Does not check for uvs in range
 template <class T>
 inline __host__ __device__ T __lerp_bilinear_data(const T* data, float3 uvs, const int start_index)
 {
-	uint start_idx = __index_full_raw(make_uint3((uvs * tile_resolution) + tile_pad)) + start_index; // can interpolate from ghost cells
-	uvs = fracf(uvs * tile_resolution);
+	uvs = (uvs * tile_resolution) + tile_pad;
+	uint3 root_idx = make_uint3(clamp(uvs, 0, total_tile_width - 1)); // can interpolate from ghost cells
+	uvs -= make_float3(root_idx);
 
-	T result = T();
-	result += data[start_idx] * (1.f - uvs.x) * (1.f - uvs.y) * (1.f - uvs.z);
-	result += data[start_idx + 1] * uvs.x * (1.f - uvs.y) * (1.f - uvs.z);
-	result += data[start_idx + total_tile_width] * (1.f - uvs.x) * uvs.y * (1.f - uvs.z);
-	result += data[start_idx + total_tile_width + 1] * uvs.x * uvs.y * (1.f - uvs.z);
-	result += data[start_idx + total_tile_width * total_tile_width] * (1.f - uvs.x) * (1.f - uvs.y) * uvs.z;
-	result += data[start_idx + total_tile_width * total_tile_width + 1] * uvs.x * (1.f - uvs.y) * uvs.z;
-	result += data[start_idx + total_tile_width * total_tile_width + total_tile_width] * (1.f - uvs.x) * uvs.y * uvs.z;
-	return result + data[start_idx + total_tile_width * total_tile_width + total_tile_width + 1] * uvs.x * uvs.y * uvs.z;
+	T result  =		data[start_index + __index_partial(root_idx					     )] * (1.f - uvs.x)	* (1.f - uvs.y) * (1.f - uvs.z);
+	  result +=		data[start_index + __index_partial(root_idx + make_uint3(1, 0, 0))] * uvs.x			* (1.f - uvs.y) * (1.f - uvs.z);
+	  result +=		data[start_index + __index_partial(root_idx + make_uint3(0, 1, 0))] * (1.f - uvs.x)	* uvs.y			* (1.f - uvs.z);
+	  result +=		data[start_index + __index_partial(root_idx + make_uint3(1, 1, 0))] * uvs.x			* uvs.y			* (1.f - uvs.z);
+	  result +=		data[start_index + __index_partial(root_idx + make_uint3(0, 0, 1))] * (1.f - uvs.x)	* (1.f - uvs.y) * uvs.z;
+	  result +=		data[start_index + __index_partial(root_idx + make_uint3(1, 0, 1))] * uvs.x			* (1.f - uvs.y) * uvs.z;
+	  result +=		data[start_index + __index_partial(root_idx + make_uint3(0, 1, 1))] * (1.f - uvs.x)	* uvs.y			* uvs.z;
+	return result + data[start_index + __index_partial(root_idx + make_uint3(1, 1, 1))] * uvs.x			* uvs.y			* uvs.z;
 }
 
 // Copies ghost voxel data for tiles from boundary tiles. gridsize = (tile res, tile res, tile pad * 6 * active_count)
 // We copy data from outer edge boundaries from ghost voxels of parent tiles.
 template <class T>
-__global__ void __copy_ghost_data(T* write, const T** read_old, const T** read_new, const gpu_boundary* curr, uint depth, const float lerp_val, const int active_count)
+static __global__ void __copy_ghost_data(T* write, T** read_old, T** read_new, const gpu_boundary* curr, const uint depth, const float lerp_val, const uint active_count)
 {
 	uint3 idx = threadIdx + blockDim * blockIdx;
-	const uint node_idx = idx.z / (6 * tile_pad);
+	const uint node_idx = idx.z / (6u * tile_pad);
 	const uint border_idx = (idx.z / tile_pad) % 6u;
 	idx.z %= tile_pad; idx.x += tile_pad; idx.y += tile_pad;
 
 	if (node_idx >= active_count)
 		return;
 
-	if (border_idx >= 3)
-		idx.z = total_tile_width - idx.z - 1;
-	if (border_idx == 0 || border_idx == 3)
-		idx = make_uint3(idx.z, idx.x, idx.y);
-	else if (border_idx == 1 || border_idx == 4)
-		idx = make_uint3(idx.x, idx.z, idx.y);
+	if (border_idx < 3							  )
+		idx.z	= total_tile_width - idx.z - 1;
+	if (border_idx == 0			|| border_idx == 3)
+		idx		= make_uint3(idx.z, idx.x, idx.y);
+	else if (border_idx == 1	|| border_idx == 4)
+		idx		= make_uint3(idx.x, idx.z, idx.y);
 
 	const uint depth_bdf = curr[node_idx * 6 + border_idx].read_depth();
 	if (depth_bdf == error_depth)
 		return;
 
-	T old_data = __lerp_bilinear_data<T>(read_old[depth - depth_bdf], target_uvs(idx, curr[node_idx * 6 + border_idx]), curr[node_idx * 6 + border_idx].read_index() * total_tile_stride);
-	T new_data = __lerp_bilinear_data<T>(read_new[depth - depth_bdf], target_uvs(idx, curr[node_idx * 6 + border_idx]), curr[node_idx * 6 + border_idx].read_index() * total_tile_stride);
+	float3 offset												= target_uvs(idx, curr[node_idx * 6 + border_idx]);
+	const uint st												= curr[node_idx * 6 + border_idx].read_index() * total_tile_stride;
+	T old_data													= __lerp_bilinear_data<T>(read_old[depth - depth_bdf], offset, st);
+	T new_data													= __lerp_bilinear_data<T>(read_new[depth - depth_bdf], offset, st);
 	write[__index_full_raw(idx) + node_idx * total_tile_stride] = (old_data * (1.f - lerp_val)) + (new_data * lerp_val);
 }
 
 // Copies from children tiles data at the end of a timestep. gridsize = (tile res, tile res, tile res * active_count)
 template <class T>
-__global__ void __copy_downsample(T* __restrict__ write, const T* __restrict__ read, const int* children_buff, const int active_count)
+static __global__ void __copy_downscale(T* __restrict__ write, const T* __restrict__ read, const int* children_buff, const uint active_count)
 {
 	uint3 idx = threadIdx + blockDim * blockIdx;
 	const uint node_idx = idx.z / tile_stride;
@@ -252,37 +294,36 @@ __global__ void __copy_downsample(T* __restrict__ write, const T* __restrict__ r
 	if (node_idx >= active_count)
 		return;
 
-	const float3 uvs = make_float3(mod(idx, half_tile_resolution)) / half_tile_resolution + tile_uv_delta;
-	const uint subdivision = (idx.x >= half_tile_resolution) * 4 + (idx.y >= half_tile_resolution) * 2 + (idx.z >= half_tile_resolution);
-	const int child = children_buff[subdivision + node_idx * 8];
+	const float3 uvs		= make_float3(mod(idx, half_tile_resolution)) / half_tile_resolution + tile_uv_delta;
+	const uint subdivision  = (idx.x >= half_tile_resolution) * 4 + (idx.y >= half_tile_resolution) * 2 + (idx.z >= half_tile_resolution);
+	const int child			= children_buff[subdivision + node_idx * 8];
 
 	if (child == -1)
 		return;
-	write[__index_int_raw(idx) + node_idx * total_tile_stride] = __lerp_bilinear_data<T>(read, uvs, child * total_tile_stride);
+	write[__index_int_raw(idx) + node_idx * total_tile_stride] = __lerp_bilinear_data_clamp<T>(read, uvs, child * total_tile_stride);
 }
 
 // Copies from parent tile data at initialization. gridsize = (tile res, tile res, tile res)
 template <class T>
-__global__ void __copy_upscale(T* __restrict__ write, const T* __restrict__ read, const int parent_idx, const int node_idx, const float3 offset)
+static __global__ void __copy_upscale(T* __restrict__ write, const T* __restrict__ read, const int parent_idx, const int node_idx, const float3 offset)
 {
 	uint3 idx = threadIdx + blockDim * blockIdx;
 	if (idx.x >= tile_resolution || idx.y >= tile_resolution || idx.z >= tile_resolution)
 		return;
 
-	float3 uvs = make_float3(idx) * .5f / tile_resolution;
-	write[__index_int_raw(idx)] = __lerp_bilinear_data<T>(read, uvs + offset, parent_idx * total_tile_stride);
+	float3 uvs												   = make_float3(idx) * .5f / tile_resolution;
+	write[__index_int_raw(idx) + node_idx * total_tile_stride] = __lerp_bilinear_data_clamp<T>(read, uvs + offset, parent_idx * total_tile_stride);
 }
 
 // Copies into new buffer upon restructure/defrag. gridsize = (num_nodes_final * total_tile_stride, 1, 1)
 template <class T>
-__global__ void __copy_restructure(const int* ids, const T* __restrict__ old_data, T* __restrict__ new_data, const uint num_nodes_final)
+static __global__ void __copy_restructure(const int* ids, const T* __restrict__ old_data, T* __restrict__ new_data, const uint num_nodes_final)
 {
 	uint new_idx = threadIdx.x + blockDim.x * blockIdx.x;
 	if (new_idx >= num_nodes_final * total_tile_stride) { return; }
 	uint new_node_index = new_idx / total_tile_stride;
 	new_data[new_idx] = old_data[(new_idx % total_tile_stride) + ids[new_node_index] * total_tile_stride];
 }
-
 
 
 
@@ -484,7 +525,7 @@ public:
 	{
 		for (int i = 0, s = hierarchy[depth].size(); i < s; i++)
 			for (int j = 0; j < 6; j++)
-				boundaries[depth].cpu_buffer_ptr[i] = boundary_info(hierarchy[depth][i], directions[j]);
+				boundaries[depth].cpu_buffer_ptr[i * 6 + j] = boundary_info(hierarchy[depth][i], directions[j]);
 		return boundaries[depth].copy_to_gpu();
 	}
 };
@@ -525,5 +566,6 @@ static std::string print_boundary_info(const node& n, const int3 dir, const octr
 	temp += "\nScaled Offset: " + to_string(make_float3(bdf.pos) / (1 << bdf.read_depth()));
 	return temp;
 }
+
 
 #endif
