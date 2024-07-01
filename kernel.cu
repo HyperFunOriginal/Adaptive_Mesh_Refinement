@@ -56,6 +56,8 @@ void tree_test()
 
     octree_allocator<ODHB<float>> tree(temp);
     tree.add_node(tree.hierarchy[0][0], 0);
+    tree.remove_node(*tree.add_node(tree.hierarchy[0][0], 4));
+    tree.add_node(tree.hierarchy[0][0], 4);
     tree.add_node(tree.hierarchy[1][0], 7);
     writeline(to_string(tree.hierarchy[0][0], tree));
 
@@ -66,6 +68,7 @@ void tree_test()
     {
         debug_node<float>(tree, 0, 0, 10, "Folder/d0.png");
         debug_node<float>(tree, 1, 0, 18, "Folder/d1.png");
+        debug_node<float>(tree, 1, 1, 18, "Folder/d1s1.png");
         debug_node<float>(tree, 2, 0, 18, "Folder/d2.png");
     }
 }

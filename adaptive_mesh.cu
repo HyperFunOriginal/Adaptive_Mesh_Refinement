@@ -121,7 +121,21 @@ struct gpu_boundary
 	}
 };
 
-
+// Octree Depth Dirty Flags
+struct ODDF
+{
+	uint data;
+	ODDF() : data(0) { }
+	bool dirty_depth(const uint depth)
+	{
+		return data & (1u << depth);
+	}
+	void set_dirty_depth(const bool state, const uint depth)
+	{
+		uint bitmask = 1u << depth;
+		data = (data & (~bitmask)) | (bitmask * state);
+	}
+};
 
 
 
@@ -338,6 +352,7 @@ struct octree_allocator
 	smart_gpu_cpu_buffer<gpu_boundary> boundaries[max_tree_depth];
 	smart_gpu_cpu_buffer<int> children[max_tree_depth];
 	int hierarchy_restructuring;
+	ODDF boundary_dirty_state;
 
 private:
 	int3 compute_absolute_position_offset(const node& node) const
@@ -354,7 +369,7 @@ private:
 	}
 
 public:
-	octree_allocator(T& dat) : associated_data(dat), invalidated(), hierarchy(), hierarchy_restructuring(-1), boundaries(), children()
+	octree_allocator(T& dat) : associated_data(dat), invalidated(), hierarchy(), hierarchy_restructuring(-1), boundary_dirty_state(), boundaries(), children()
 	{
 		int test = -1;
 		assert(test >> 1 == -1);
@@ -424,9 +439,8 @@ public:
 
 
 
-
-	// Adds a node to the octree - first checks if there is a free slot from an invalidated ndoe
-	node* add_node(node& parent, const uint subdivision)
+private:
+	node* __add_node(node& parent, const uint subdivision)
 	{
 		uint new_depth = parent.pos.read_depth() + 1;
 		if (new_depth >= max_tree_depth || parent.children[subdivision] != -1)
@@ -449,8 +463,6 @@ public:
 
 				invalidated.erase(i);
 				parent.children[subdivision] = data.read_index();
-				init_data(associated_data, parent.pos.read_index(), ptr->pos.read_index(), make_float3(ptr->pos.read_subdivision_uint3()) * .5f, new_depth);
-
 				return ptr;
 			}
 		}
@@ -460,9 +472,23 @@ public:
 
 		hierarchy[new_depth][size].pos.write_index(size);
 		parent.children[subdivision] = size;
-		init_data(associated_data, parent.pos.read_index(), size, make_float3(hierarchy[new_depth][size].pos.read_subdivision_uint3()) * .5f, new_depth);
 		return &hierarchy[new_depth][size];
 	}
+
+public:
+	// Adds a node to the octree - first checks if there is a free slot from an invalidated node
+	node* add_node(node& parent, const uint subdivision, bool symbolic = false)
+	{
+		node* ptr = __add_node(parent, subdivision);
+		if (ptr == nullptr)
+			return ptr;
+		uint curr_depth = ptr->pos.read_depth();
+		if (!symbolic)
+			init_data(associated_data, parent.pos.read_index(), ptr->pos.read_index(), make_float3(ptr->pos.read_subdivision_uint3()) * .5f, curr_depth);
+		boundary_dirty_state.data |= 4294967295u << curr_depth;
+		return ptr;
+	}
+
 	// Removes a node from the octree by marking it as invalidated
 	bool remove_node(node& node)
 	{
@@ -475,9 +501,11 @@ public:
 
 		invalidated.push_back(node.pos);
 		hierarchy[depth - 1][node.pos.read_parent_index()].children[node.pos.read_subdivision()] = -1; // effective autoclear children
+		boundary_dirty_state.data |= 4294967295u << depth;
 		node.pos = OPS(error_depth, -1, 0, -1);
 		return true;
 	}
+
 
 
 	// Finds immediate neighbour/sibling in a certain direction, with units of multiples of node width. We clamp for ghost voxel boundaries.
@@ -526,6 +554,7 @@ public:
 		for (int i = 0, s = hierarchy[depth].size(); i < s; i++)
 			for (int j = 0; j < 6; j++)
 				boundaries[depth].cpu_buffer_ptr[i * 6 + j] = boundary_info(hierarchy[depth][i], directions[j]);
+		boundary_dirty_state.set_dirty_depth(false, depth);
 		return boundaries[depth].copy_to_gpu();
 	}
 };
