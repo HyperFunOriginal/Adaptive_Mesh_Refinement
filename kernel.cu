@@ -13,7 +13,6 @@ __global__ void __init_root_data(float* root_buff)
     root_buff[__index_full_raw(idx)] = 1.f / (1.f + 0.5f / length(__uvs(idx) - .5f));
 }
 
-
 // Example Specialization for defragmentation
 template<>
 static void octree_allocator<ODHB<float>>::copy_all_data(const smart_gpu_cpu_buffer<int>& change_index, ODHB<float>& buff, const int depth, const int num_nodes_final)
@@ -56,16 +55,19 @@ void tree_test()
 
     octree_allocator<ODHB<float>> tree(temp);
     tree.add_node(tree.hierarchy[0][0], 0);
-    tree.remove_node(*tree.add_node(tree.hierarchy[0][0], 4));
     tree.add_node(tree.hierarchy[0][0], 4);
     tree.add_node(tree.hierarchy[1][0], 7);
     writeline(to_string(tree.hierarchy[0][0], tree));
 
+    tree.copy_children_data(0);
+    tree.copy_children_data(1);
+    tree.copy_children_data(2);
     copy_ghosts_debug(tree, 1);
     copy_ghosts_debug(tree, 2);
 
     if (create_folder("Folder"))
     {
+        debug_tree(tree, "Folder/test.png");
         debug_node<float>(tree, 0, 0, 10, "Folder/d0.png");
         debug_node<float>(tree, 1, 0, 18, "Folder/d1.png");
         debug_node<float>(tree, 1, 1, 18, "Folder/d1s1.png");

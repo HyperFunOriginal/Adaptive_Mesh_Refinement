@@ -116,8 +116,30 @@ static void copy_ghosts_debug(octree_allocator<ODHB<T>>& tree, const uint depth)
     const uint active_count = tree.hierarchy[depth].size();
     dim3 threads(min(tile_resolution, 16), min(tile_resolution, 16), min(tile_pad, 4));
     dim3 blocks(ceilf(tile_resolution / ((float)threads.x)), ceilf(tile_resolution / ((float)threads.y)), ceilf((tile_pad * 6 * active_count) / ((float)threads.z)));
-    __copy_ghost_data<float><<<blocks, threads>>>(tree.associated_data.buff1[depth].gpu_buffer_ptr, tree.associated_data.old_buffers.gpu_buffer_ptr, tree.associated_data.old_buffers.gpu_buffer_ptr, tree.boundaries[depth].gpu_buffer_ptr, depth, 0.f, active_count);
+    __copy_ghost_data<float><<<blocks, threads>>>(tree.associated_data.buff1[depth].gpu_buffer_ptr, tree.associated_data.old_buffers.gpu_buffer_ptr, tree.associated_data.old_buffers.gpu_buffer_ptr, tree.boundaries[depth].gpu_buffer_ptr, depth, tree.elapsed_time, active_count);
     cuda_sync();
+}
+
+template <class T>
+__global__ void ___tree_to_img_2d(uint* pixels, T** data, int** children, const uint width, const uint height, const float z_uvs)
+{
+    const uint2 idx = make_uint2(threadIdx + blockDim * blockIdx);
+    if (idx.x >= width || idx.y >= height)
+        return;
+    float3 global_uvs = make_float3(((float)idx.x) / width, ((float)idx.y) / height, z_uvs);
+    const uint2 indices = __traverse_tree(global_uvs, children);
+    bool condition = global_min(global_uvs) < 0.03f || global_max(global_uvs) > 0.97f;
+    pixels[idx.y * width + idx.x] = condition ? 4294902015u : ___rgba<T>(__lerp_trilinear_data_clamp<T>(data[indices.x], global_uvs, indices.y * total_tile_stride));
+}
+
+template <class T>
+static void debug_tree(octree_allocator<ODHB<T>>& tree, const char* filename, const uint width = tile_resolution * 32, const uint height = tile_resolution * 32, const float z_uvs = 0.45f)
+{
+    smart_gpu_cpu_buffer<uint> temp(width * height);
+    const dim3 threads(min(width, 16), min(height, 16));
+    const dim3 blocks((uint)ceilf(width / (float)threads.x), (uint)ceilf(height / (float)threads.y));
+    ___tree_to_img_2d<<<blocks, threads>>>(temp.gpu_buffer_ptr, tree.associated_data.old_buffers.gpu_buffer_ptr, tree.children_hierarchy.gpu_buffer_ptr, width, height, z_uvs);
+    temp.copy_to_cpu(); cuda_sync(); lodepng_encode32_file(filename, reinterpret_cast<const unsigned char*>(temp.cpu_buffer_ptr), width, height); temp.destroy();
 }
 
 #endif
